@@ -134,23 +134,93 @@ class ReverseDCF:
 
     @classmethod
     def _load_single_file(cls, xl, path, params):
-        """Load from single reverse_dcf.xlsx with stacked layout.
-        Fundamentals: BBG block on top, HC block below (same cols A-G).
-        Detects HC block by finding 'HARD COPY' section header.
+        """Load from single reverse_dcf.xlsx — transposed layout.
+        Fields as columns, years as rows. HC block found by 'HARD COPY' marker.
         """
         raw = pd.read_excel(xl, "Fundamentals", header=None)
 
-        # Find the HC block: look for row containing "HARD COPY"
-        hc_start = None
+        # Find HC block
+        hc_header_row = None
         for i in range(len(raw)):
             val = str(raw.iloc[i, 0]) if pd.notna(raw.iloc[i, 0]) else ""
             if "HARD COPY" in val.upper():
-                hc_start = i + 1  # next row is the header
+                hc_header_row = i + 1  # next row is column headers
                 break
 
-        if hc_start is None:
-            # Fallback: try side-by-side layout (v3 format with Item.1)
-            return cls._load_single_file_v3(xl, path, params)
+        if hc_header_row is None:
+            raise ValueError("Cannot find 'HARD COPY' section in Fundamentals sheet")
+
+        # Read HC block from the header row
+        hc = pd.read_excel(xl, "Fundamentals", header=hc_header_row)
+
+        # Drop unnamed columns and empty rows
+        hc = hc[[c for c in hc.columns if not str(c).startswith("Unnamed")]]
+        first_col = hc.columns[0]  # "Year" or "Date"
+        hc = hc.dropna(subset=[first_col])
+
+        # Keep only numeric year rows BEFORE any section marker (LTM, FY1, DERIVED)
+        stop_labels = ["LTM", "FY1", "DERIVED", "SUMMARY"]
+        valid_rows = []
+        for idx, row in hc.iterrows():
+            label = str(row[first_col]).strip().upper()
+            if any(s in label for s in stop_labels):
+                break
+            if label.isdigit():
+                valid_rows.append(idx)
+        hc_years = hc.loc[valid_rows].copy()
+
+        # Also grab LTM and FY1 rows
+        ltm_mask = hc[first_col].astype(str).str.upper() == "LTM"
+        est_mask = hc[first_col].astype(str).str.contains("FY1|EST", case=False, na=False)
+        hc_ltm = hc[ltm_mask].copy()
+        hc_est = hc[est_mask].copy()
+
+        # Build historical DataFrame: index=years, columns=fields
+        hc_years = hc_years.set_index(first_col)
+        hc_years.index = pd.to_datetime([str(int(float(y))) for y in hc_years.index], format="%Y")
+        hc_years.index.name = "Date"
+
+        # Map column names to engine names
+        col_map = {
+            "Revenue": "Revenue", "EBIT": "EBIT", "EBITDA": "EBITDA",
+            "D&A": "DA", "Tax Expense": "Tax_Expense", "Interest Exp": "Interest_Expense",
+            "Net Income": "Net_Income", "Total Debt": "Total_Debt",
+            "Cash & Equiv": "Cash", "Minority Int": "Minority_Interest",
+            "Shares Out": "Shares_Outstanding", "Book Equity": "Book_Equity",
+            "Total Assets": "Total_Assets", "CapEx": "CapEx", "CFO": "CFO",
+            "Chg in NWC": "Change_NWC",
+        }
+        hist = hc_years.rename(columns=col_map)
+        valid = [v for v in col_map.values() if v in hist.columns]
+        hist = hist[valid]
+        hist = hist.apply(pd.to_numeric, errors="coerce")
+
+        # Current: HC in col C (Hard Copy), header at row 3 (header=2)
+        curr_raw = pd.read_excel(xl, "Current", header=2)
+        curr_raw = curr_raw.dropna(subset=["Field"])
+        hc_col = "Hard Copy" if "Hard Copy" in curr_raw.columns else curr_raw.columns[2] if len(curr_raw.columns) > 2 else None
+        current = dict(zip(curr_raw["Field"], curr_raw[hc_col])) if hc_col else {}
+
+        curr_map = {
+            "Price": "Price", "Market Cap": "Market_Cap",
+            "Shares Out": "Shares_Out_Current", "EV": "EV",
+            "Beta Raw": "Beta_Raw", "Beta Adj": "Beta_Adj",
+            "BBG WACC": "BBG_WACC", "ROIC": "ROIC",
+            "Div Yield": "Div_Yield", "D/E": "Debt_to_Equity",
+            "Op Margin": "Operating_Margin",
+            "Cons Rev FY1": "Consensus_Revenue_FY1",
+            "Cons EPS FY1": "Consensus_EPS_FY1",
+            "Net Debt": "Net_Debt", "Minority Int": "Minority_Interest",
+            "EV calc": "EV_Calc",
+        }
+        current = {curr_map.get(k, k): v for k, v in current.items() if k in curr_map}
+
+        # WACC
+        if "WACC" in xl.sheet_names:
+            params = cls._parse_wacc_sheet_single(xl, params)
+
+        ticker = Path(path).stem.replace("reverse_dcf_", "").replace("reverse_dcf", "TICKER")
+        return cls(hist, current, params, ticker)
 
         # Read HC block: header row at hc_start, data below
         hc_block = pd.read_excel(xl, "Fundamentals", header=hc_start, nrows=20)
@@ -297,26 +367,41 @@ class ReverseDCF:
 
     @classmethod
     def _parse_wacc_sheet_single(cls, xl, params):
-        """Parse WACC sheet from single-file format (v3: Linked/Manual/Active/Used)."""
-        wacc_df = pd.read_excel(xl, "WACC", header=3)
-        wacc_df = wacc_df.dropna(subset=["Parameter"])
+        """Parse WACC sheet — auto-detects column names."""
+        # Try header=2 first (current layout), fallback to header=3
+        for h in [2, 3]:
+            wacc_df = pd.read_excel(xl, "WACC", header=h)
+            param_col = next((c for c in wacc_df.columns if str(c).lower().startswith("param")), None)
+            if param_col:
+                break
+        if param_col is None:
+            return params or DCFParams()
 
+        wacc_df = wacc_df.dropna(subset=[param_col])
         if params is None:
             params = DCFParams()
 
         param_map = {
-            "Risk-Free Rate": "risk_free",
-            "Equity Risk Premium": "erp",
+            "Rf": "risk_free", "Risk-Free Rate": "risk_free",
+            "ERP": "erp", "Equity Risk Premium": "erp",
             "Beta": "beta",
-            "Pre-Tax Cost of Debt": "cost_of_debt_pretax",
+            "Pre-Tax CoD": "cost_of_debt_pretax", "Pre-Tax Cost of Debt": "cost_of_debt_pretax",
             "Tax Rate": "tax_rate",
-            "Equity Weight": "equity_weight",
-            "Terminal Growth": "terminal_growth",
+            "Eq Weight": "equity_weight", "Equity Weight": "equity_weight",
+            "Tg": "terminal_growth", "Terminal Growth": "terminal_growth",
+            "T Margin": "terminal_ebit_margin", "Terminal Margin": "terminal_ebit_margin",
             "Terminal EBIT Margin": "terminal_ebit_margin",
-            "Projection Years": "projection_years",
-            "Bull Offset": "bull_growth_add",
-            "Bear Offset": "bear_growth_add",
+            "Proj Yrs": "projection_years", "Projection Years": "projection_years",
+            "Bull": "bull_growth_add", "Bull Offset": "bull_growth_add",
+            "Bear": "bear_growth_add", "Bear Offset": "bear_growth_add",
         }
+
+        # Auto-detect value columns
+        cols_lower = {c: c.lower() for c in wacc_df.columns}
+        used_col = next((c for c, cl in cols_lower.items() if cl in ["used", "used value"]), None)
+        manual_col = next((c for c, cl in cols_lower.items() if cl in ["manual", "manual override"]), None)
+        linked_col = next((c for c, cl in cols_lower.items() if cl in ["linked", "linked value"]), None)
+        active_col = next((c for c, cl in cols_lower.items() if cl == "active"), None)
 
         def _to_float(val):
             if pd.isna(val): return None
@@ -324,15 +409,15 @@ class ReverseDCF:
             except (ValueError, TypeError): return None
 
         for _, row in wacc_df.iterrows():
-            name = row.get("Parameter", "")
+            name = str(row.get(param_col, "")).strip()
             attr = param_map.get(name)
             if not attr:
                 continue
 
-            active = str(row.get("Active", "")).strip()
-            used = _to_float(row.get("Used Value"))
-            linked = _to_float(row.get("Linked Value"))
-            manual = _to_float(row.get("Manual Override"))
+            active = str(row.get(active_col, "")).strip() if active_col else ""
+            used = _to_float(row.get(used_col)) if used_col else None
+            linked = _to_float(row.get(linked_col)) if linked_col else None
+            manual = _to_float(row.get(manual_col)) if manual_col else None
 
             # Smart resolution:
             # 1. If Active=Manual → use Manual Override
