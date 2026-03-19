@@ -734,10 +734,26 @@ class ReverseDCF:
         self.capex_pct = (self.params.capex_pct_revenue_override
                          or (abs(capex) / self.base_revenue if self.base_revenue else 0.05))
 
-        nwc = _safe_last(
-            h.get("Change_NWC", pd.Series(dtype=float)), "Change in NWC", fallback=0)
+        nwc_series = h.get("Change_NWC", pd.Series(dtype=float)).dropna()
+        if len(nwc_series) > 2:
+            rev_series = h.get("Revenue", pd.Series(dtype=float)).dropna()
+            if len(rev_series) >= len(nwc_series):
+                nwc_pct_vals = nwc_series / rev_series.iloc[:len(nwc_series)].values
+                # If NWC swings between large positive and negative, it's noise → use 0
+                if nwc_pct_vals.std() > 0.05 or (nwc_pct_vals.max() > 0 and nwc_pct_vals.min() < 0):
+                    nwc = 0
+                    self._validation_warnings.append(
+                        f"INFO: NWC set to 0 (high variance: {nwc_pct_vals.std():.1%} — cyclical wash)")
+                else:
+                    nwc = nwc_pct_vals.median() * self.base_revenue
+                    self._validation_warnings.append(
+                        f"INFO: NWC uses median ratio ({nwc_pct_vals.median():.1%} of Rev)")
+            else:
+                nwc = 0
+        else:
+            nwc = _safe_last(nwc_series, "Change in NWC", fallback=0)
         self.nwc_pct = (self.params.nwc_pct_revenue_override
-                       or (nwc / self.base_revenue if self.base_revenue else 0.01))
+                       or (nwc / self.base_revenue if self.base_revenue else 0.0))
 
         # Tax rate from data if not overridden
         if "Tax_Expense" in h and "EBIT" in h:
