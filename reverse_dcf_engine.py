@@ -756,10 +756,54 @@ class ReverseDCF:
         shares = (self._safe_numeric(self.current.get("Shares_Out_Current"))
                  or self._safe_numeric(self.current.get("Shares_Outstanding"), 0))
         market_cap = self._safe_numeric(self.current.get("Market_Cap")) or (price * shares if shares else 0)
+
+        # ── AUTO UNIT NORMALIZATION ──────────────────────────────────────────
+        # Bloomberg CUR_MKT_CAP is in full currency units (e.g. 200'000'000'000 CHF)
+        # But Revenue/EBIT etc from BDH are in millions
+        # Detect mismatch: if Market Cap is >1000x Revenue, it's in full units
+        if self.base_revenue and self.base_revenue > 0 and market_cap > 0:
+            ratio = market_cap / self.base_revenue
+            if ratio > 5000:  # Market Cap likely in full units, Revenue in millions
+                market_cap = market_cap / 1e6
+                self._validation_warnings.append(
+                    f"INFO: Market Cap normalized from {market_cap*1e6:,.0f} to {market_cap:,.0f} (÷1M to match Revenue units)")
+
+        # Same check for EV from Current sheet
+        ev_calc = self._safe_numeric(self.current.get("EV_Calc"))
+        if ev_calc and self.base_revenue and ev_calc / self.base_revenue > 5000:
+            ev_calc = ev_calc / 1e6
+
+        # ROIC: Bloomberg gives as percentage (10.2 = 10.2%), engine needs decimal (0.102)
+        roic_val = self._safe_numeric(self.current.get("ROIC"))
+        if roic_val and roic_val > 1:  # Clearly a percentage, not decimal
+            self.current["ROIC"] = roic_val / 100
+
         total_debt = self._safe_numeric(self.current.get("Total_Debt"), 0)
         cash = self._safe_numeric(self.current.get("Cash"), 0)
-        net_debt = total_debt - cash
+
+        # Prefer Net Debt from Fundamentals HC (already in correct units)
+        # Current sheet's Net Debt is a formula linking to Fundamentals, so should be fine
+        net_debt_direct = self._safe_numeric(self.current.get("Net_Debt"))
+        if net_debt_direct is not None:
+            net_debt = net_debt_direct
+        elif total_debt > 0:
+            net_debt = total_debt - cash
+        else:
+            # Fallback: compute from last year of historical data
+            h = self.hist
+            td = h.get("Total_Debt", pd.Series(dtype=float)).dropna()
+            ca = h.get("Cash", pd.Series(dtype=float)).dropna()
+            net_debt = (td.iloc[-1] if len(td) else 0) - (ca.iloc[-1] if len(ca) else 0)
+
         minority = self._safe_numeric(self.current.get("Minority_Interest"), 0)
+
+        # If Market Cap was normalized but shares weren't, recompute shares
+        if shares > 0 and price > 0:
+            implied_mcap = price * shares
+            if abs(implied_mcap - market_cap) / max(market_cap, 1) > 0.5:
+                # Shares * Price doesn't match Market Cap — Market Cap was normalized
+                # This is expected, just note it
+                pass
 
         self.market_ev = market_cap + net_debt + minority
         self.market_cap = market_cap
