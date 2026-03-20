@@ -68,30 +68,36 @@ roic_sp = r["roic_gate"]["spread"]
 reasons = []
 if hp.max_revenue_growth and ig > hp.max_revenue_growth > 0:
     reasons.append(f"Implied growth ({ig:.1%}) exceeds historical max ({hp.max_revenue_growth:.1%})")
-if hp.revenue_cagr_5y and hp.revenue_cagr_5y != 0 and abs(ig) > abs(hp.revenue_cagr_5y) * 3:
-    reasons.append(f"Implied growth is {abs(ig/hp.revenue_cagr_5y):.0f}× the 5Y CAGR ({hp.revenue_cagr_5y:.1%})")
+if hp.revenue_cagr_5y and hp.revenue_cagr_5y != 0 and ig > 0 and ig > abs(hp.revenue_cagr_5y) * 3:
+    reasons.append(f"Implied growth is {ig/hp.revenue_cagr_5y:.0f}× the 5Y CAGR ({hp.revenue_cagr_5y:.1%})")
 if tv_pct > 0.90:
     reasons.append(f"Terminal Value = {tv_pct:.0%} of EV (high uncertainty)")
 if roic_sp < 0:
     reasons.append(f"ROIC < WACC — growth destroys value")
-if ig < 0 and hp.revenue_cagr_5y and hp.revenue_cagr_5y > 0:
-    reasons.append("Market implies decline despite positive historical growth")
+if ig < -0.05 and hp.revenue_cagr_5y and hp.revenue_cagr_5y > -0.02:
+    reasons.append(f"Market implies significant decline ({ig:.1%}) despite stable history ({hp.revenue_cagr_5y:.1%})")
+if ig > 0.15:
+    reasons.append(f"Implied growth ({ig:.1%}) is very high")
 
-if red_flags >= 3:
+# Verdict: check direction first, then magnitude
+if ig < -0.03 and hp.revenue_cagr_5y and hp.revenue_cagr_5y > -0.01:
+    verdict, v_color, v_icon = "POTENTIALLY UNDERVALUED", C_GREEN, "🟢"
+    v_detail = f"Market implies {ig:.1%} annual decline, but the company has been stable ({hp.revenue_cagr_5y:.1%} 5Y CAGR). Market may be too pessimistic."
+elif ig < 0 and hp.revenue_cagr_5y and hp.revenue_cagr_5y < -0.02:
+    verdict, v_color, v_icon = "PRICED FOR DECLINE", C_AMBER, "🟡"
+    v_detail = f"Market implies continued decline ({ig:.1%}), broadly consistent with history ({hp.revenue_cagr_5y:.1%})."
+elif ig > 0 and red_flags >= 3:
     verdict, v_color, v_icon = "OVERPRICED", C_RED, "🔴"
     v_detail = "Market expectations significantly exceed what the company has historically delivered."
-elif red_flags >= 2:
+elif ig > 0 and red_flags >= 2:
     verdict, v_color, v_icon = "LIKELY OVERPRICED", C_CORAL, "🟠"
     v_detail = "Implied growth is stretched relative to historical fundamentals."
-elif red_flags == 0 and roic_sp > 0 and ig >= 0:
+elif red_flags <= 1 and roic_sp > 0:
     verdict, v_color, v_icon = "FAIRLY VALUED", C_GREEN, "🟢"
     v_detail = "Implied expectations are broadly consistent with the historical track record."
-elif ig < 0 and hp.revenue_cagr_5y and hp.revenue_cagr_5y >= 0:
-    verdict, v_color, v_icon = "POTENTIALLY UNDERVALUED", C_GREEN, "🟢"
-    v_detail = "Market implies revenue decline — potential opportunity if fundamentals hold."
 else:
     verdict, v_color, v_icon = "FAIR VALUE RANGE", C_AMBER, "🟡"
-    v_detail = "Mixed signals — some implied expectations stretched, others reasonable."
+    v_detail = "Mixed signals — implied expectations partially supported by history."
 
 # ── Title + Banner ────────────────────────────────────────────────────────────
 st.title(f"Reverse DCF: {r['ticker']}")
