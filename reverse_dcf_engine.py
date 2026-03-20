@@ -94,11 +94,13 @@ class ReverseDCF:
         current: dict,
         params: DCFParams = None,
         ticker: str = "",
+        ltm_data: dict = None,
     ):
         self.hist = historical.copy()
         self.current = current
         self.params = params or DCFParams()
         self.ticker = ticker
+        self.ltm_data = ltm_data or {}
         self._prepare_data()
 
     @classmethod
@@ -195,6 +197,18 @@ class ReverseDCF:
         hist = hist[valid]
         hist = hist.apply(pd.to_numeric, errors="coerce")
 
+        # Build LTM dict if available
+        ltm_data = {}
+        if not hc_ltm.empty:
+            ltm_row = hc_ltm.iloc[0]
+            for orig, mapped in col_map.items():
+                val = ltm_row.get(orig)
+                if pd.notna(val):
+                    try:
+                        ltm_data[mapped] = float(val)
+                    except (ValueError, TypeError):
+                        pass  # skip #N/A etc.
+
         # Current: HC in col C (Hard Copy), header at row 3 (header=2)
         curr_raw = pd.read_excel(xl, "Current", header=2)
         curr_raw = curr_raw.dropna(subset=["Field"])
@@ -220,7 +234,7 @@ class ReverseDCF:
             params = cls._parse_wacc_sheet_single(xl, params)
 
         ticker = Path(path).stem.replace("reverse_dcf_", "").replace("reverse_dcf", "TICKER")
-        return cls(hist, current, params, ticker)
+        return cls(hist, current, params, ticker, ltm_data=ltm_data)
 
         # Read HC block: header row at hc_start, data below
         hc_block = pd.read_excel(xl, "Fundamentals", header=hc_start, nrows=20)
@@ -703,11 +717,30 @@ class ReverseDCF:
                 )
             return clean.iloc[-1]
 
-        # Latest year as base
-        self.base_revenue = _safe_last(
+        # Latest year as base — or LTM if available and plausible
+        fy_revenue = _safe_last(
             h.get("Revenue", pd.Series(dtype=float)), "Revenue", required=True) or 1
-        self.base_ebit = _safe_last(
+        fy_ebit = _safe_last(
             h.get("EBIT", pd.Series(dtype=float)), "EBIT", required=True) or 0
+
+        ltm_rev = self.ltm_data.get("Revenue")
+        ltm_ebit = self.ltm_data.get("EBIT")
+
+        # Use LTM if available and within 50-150% of last FY (sanity check)
+        if ltm_rev and 0.5 < ltm_rev / fy_revenue < 1.5:
+            self.base_revenue = ltm_rev
+            self._validation_warnings.append(
+                f"INFO: Using LTM Revenue ({ltm_rev:,.0f}) as base instead of FY ({fy_revenue:,.0f})")
+        else:
+            self.base_revenue = fy_revenue
+            if ltm_rev:
+                self._validation_warnings.append(
+                    f"INFO: LTM Revenue ({ltm_rev:,.0f}) outside plausible range vs FY ({fy_revenue:,.0f}) — using FY")
+
+        if ltm_ebit and ltm_rev and 0.5 < ltm_rev / fy_revenue < 1.5:
+            self.base_ebit = ltm_ebit
+        else:
+            self.base_ebit = fy_ebit
 
         # EBIT fallback: EBITDA - D&A
         if self.base_ebit == 0 and "EBITDA" in h and "DA" in h:
@@ -720,6 +753,10 @@ class ReverseDCF:
         self.base_da = _safe_last(
             h.get("DA", pd.Series(dtype=float)), "D&A",
             fallback=self.base_revenue * 0.03)
+        # Override with LTM if available
+        ltm_da = self.ltm_data.get("DA")
+        if ltm_da and self.base_revenue == self.ltm_data.get("Revenue", 0):
+            self.base_da = ltm_da
 
         # Ratios from last available year
         self.ebit_margin = (self.params.ebit_margin_override
