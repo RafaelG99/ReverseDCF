@@ -1049,6 +1049,90 @@ class ReverseDCF:
 
         return checks
 
+    def performance_decomposition(self) -> dict:
+        """Decompose historical return into: Revenue Growth, Margin Change,
+        Multiple Change, Shareholder Yield (Div + Buyback)."""
+        h = self.hist
+        rev = h.get("Revenue", pd.Series(dtype=float)).dropna()
+        ebit = h.get("EBIT", pd.Series(dtype=float)).dropna()
+        shares = h.get("Shares_Outstanding", pd.Series(dtype=float)).dropna()
+        net_inc = h.get("Net_Income", pd.Series(dtype=float)).dropna()
+
+        if len(rev) < 2 or len(ebit) < 2:
+            return {"available": False}
+
+        n = len(rev) - 1  # number of periods
+        first_rev, last_rev = rev.iloc[0], rev.iloc[-1]
+        first_ebit, last_ebit = ebit.iloc[0], ebit.iloc[-1]
+
+        # Revenue Growth (annualized)
+        rev_growth_total = last_rev / first_rev - 1 if first_rev else 0
+        rev_growth_ann = (1 + rev_growth_total) ** (1/n) - 1 if n > 0 else 0
+
+        # Margin Change
+        first_margin = first_ebit / first_rev if first_rev else 0
+        last_margin = last_ebit / last_rev if last_rev else 0
+        margin_change = last_margin - first_margin
+
+        # Margin effect on earnings growth (revenue constant, only margin changes)
+        margin_effect_total = (last_margin / first_margin - 1) if first_margin else 0
+        margin_effect_ann = (1 + margin_effect_total) ** (1/n) - 1 if n > 0 else 0
+
+        # EPS growth (combines rev growth + margin + share count change)
+        if len(net_inc) >= 2 and len(shares) >= 2:
+            first_eps = net_inc.iloc[0] / shares.iloc[0] if shares.iloc[0] else 0
+            last_eps = net_inc.iloc[-1] / shares.iloc[-1] if shares.iloc[-1] else 0
+            eps_growth_ann = ((last_eps / first_eps) ** (1/n) - 1) if first_eps and n > 0 else 0
+        else:
+            first_eps, last_eps, eps_growth_ann = 0, 0, 0
+
+        # Multiple Change: P/E change (using price and EPS)
+        # We approximate: if we know current P/E and can compute historical P/E
+        if self.price and last_eps:
+            current_pe = self.price / last_eps
+        else:
+            current_pe = 0
+
+        # Buyback Yield (annualized share count reduction)
+        if len(shares) >= 2 and shares.iloc[0] > 0:
+            buyback_total = 1 - shares.iloc[-1] / shares.iloc[0]
+            buyback_ann = 1 - (shares.iloc[-1] / shares.iloc[0]) ** (1/n) if n > 0 else 0
+        else:
+            buyback_total, buyback_ann = 0, 0
+
+        # Dividend Yield (approximate from current data)
+        div_yield = self._safe_numeric(self.current.get("Div_Yield"), 0)
+        if div_yield > 1:  # BBG gives as percentage
+            div_yield = div_yield / 100
+
+        # Shareholder Yield = Div + Buyback
+        shareholder_yield = div_yield + buyback_ann
+
+        # Total decomposition (approximate)
+        # Total Return ≈ Revenue Growth + Margin Effect + Buyback + Dividend + Multiple Change
+        # Multiple change is the residual
+        earnings_growth_ann = rev_growth_ann + margin_effect_ann
+        
+        return {
+            "available": True,
+            "period_years": n,
+            "start_year": str(rev.index[0].year),
+            "end_year": str(rev.index[-1].year),
+            "revenue_growth_ann": rev_growth_ann,
+            "margin_change_pp": margin_change,
+            "margin_first": first_margin,
+            "margin_last": last_margin,
+            "margin_effect_ann": margin_effect_ann,
+            "eps_growth_ann": eps_growth_ann,
+            "buyback_ann": buyback_ann,
+            "buyback_total": buyback_total,
+            "div_yield": div_yield,
+            "shareholder_yield": shareholder_yield,
+            "current_pe": current_pe,
+            "shares_first": shares.iloc[0] if len(shares) >= 1 else 0,
+            "shares_last": shares.iloc[-1] if len(shares) >= 1 else 0,
+        }
+
     def run(self) -> dict:
         """Full Reverse DCF analysis."""
         hist_profile = self._compute_historical_profile()
@@ -1057,6 +1141,7 @@ class ReverseDCF:
         tv_decomp = self.tv_decomposition(implied_g)
         roic = self.roic_gate(implied_g, hist_profile)
         plausibility = self.plausibility_check(implied_g, hist_profile)
+        perf_decomp = self.performance_decomposition()
 
         return {
             "ticker": self.ticker,
@@ -1073,6 +1158,7 @@ class ReverseDCF:
             "roic_gate": roic,
             "plausibility": plausibility,
             "historical_profile": hist_profile,
+            "performance_decomposition": perf_decomp,
             "validation_warnings": getattr(self, "_validation_warnings", []),
         }
 
