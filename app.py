@@ -98,15 +98,15 @@ st.title(f"Reverse DCF: {r['ticker']}")
 
 st.markdown(f"""
 <div style="background-color: {v_color}15; border-left: 5px solid {v_color};
-            padding: 16px 20px; border-radius: 4px; margin-bottom: 20px;">
-    <span style="font-size: 24px; font-weight: bold; color: {v_color};">
+            padding: 20px 24px; border-radius: 4px; margin-bottom: 20px;">
+    <span style="font-size: 28px; font-weight: bold; color: {v_color};">
         {v_icon} {verdict}
     </span><br>
-    <span style="font-size: 14px; color: #333;">
+    <span style="font-size: 18px; color: #333; line-height: 1.6;">
         Market implies <b>{ig:.1%} p.a. revenue growth</b> over {proj} years to justify the current price of {r['price']:,.2f}.
         {v_detail}
     </span>
-    {"<br><span style='font-size: 12px; color: #666;'>" + " · ".join(reasons[:3]) + "</span>" if reasons else ""}
+    {"<br><span style='font-size: 14px; color: #555; line-height: 1.5;'>" + " · ".join(reasons[:3]) + "</span>" if reasons else ""}
 </div>
 """, unsafe_allow_html=True)
 
@@ -173,6 +173,80 @@ with cr:
                       plot_bgcolor="white", font=dict(family="Arial"))
     st.plotly_chart(fig3, use_container_width=True)
 
+# ── Performance Decomposition ─────────────────────────────────────────────────
+st.markdown("---")
+pd_data = r.get("performance_decomposition", {})
+if pd_data.get("available"):
+    st.subheader(f"Performance Decomposition ({pd_data['start_year']}–{pd_data['end_year']})")
+    st.caption("How was historical performance generated? Revenue growth, margin changes, buybacks, or multiple expansion?")
+    
+    pd_left, pd_right = st.columns([3, 2])
+    
+    with pd_left:
+        # Waterfall chart
+        components = [
+            ("Revenue<br>Growth", pd_data["revenue_growth_ann"], C_TEAL),
+            ("Margin<br>Effect", pd_data["margin_effect_ann"], C_AMBER if pd_data["margin_effect_ann"] >= 0 else C_RED),
+            ("Buyback<br>Yield", pd_data["buyback_ann"], C_GREEN if pd_data["buyback_ann"] >= 0 else C_RED),
+            ("Dividend<br>Yield", pd_data["div_yield"], C_GREEN),
+        ]
+        
+        labels = [c[0] for c in components]
+        values = [c[1] for c in components]
+        colors = [c[2] for c in components]
+        
+        fig_pd = go.Figure(go.Waterfall(
+            x=labels,
+            y=values,
+            connector={"line": {"color": "#ccc"}},
+            increasing={"marker": {"color": C_GREEN}},
+            decreasing={"marker": {"color": C_RED}},
+            totals={"marker": {"color": C_TEAL}},
+            text=[f"{v:+.1%}" for v in values],
+            textposition="outside",
+            textfont=dict(size=13),
+        ))
+        
+        # Add total bar
+        total = sum(values)
+        fig_pd.add_trace(go.Bar(
+            x=["Total<br>Shareholder<br>Return"],
+            y=[total],
+            marker_color=C_TEAL,
+            text=[f"{total:+.1%}"],
+            textposition="outside",
+            textfont=dict(size=14, color=C_TEAL),
+            width=0.5,
+        ))
+        
+        fig_pd.update_layout(
+            height=400, showlegend=False,
+            yaxis_tickformat=".0%", yaxis_title="Annualized Contribution",
+            plot_bgcolor="white", font=dict(family="Arial"),
+            waterfallgap=0.3,
+        )
+        st.plotly_chart(fig_pd, use_container_width=True)
+    
+    with pd_right:
+        st.markdown("**Annualized Components**")
+        st.write(f"Revenue Growth: **{pd_data['revenue_growth_ann']:+.1%}** p.a.")
+        st.write(f"Margin Change: **{pd_data['margin_effect_ann']:+.1%}** p.a. ({pd_data['margin_first']:.1%} → {pd_data['margin_last']:.1%})")
+        st.write(f"Buyback Yield: **{pd_data['buyback_ann']:+.1%}** p.a. ({pd_data['shares_first']:,.0f} → {pd_data['shares_last']:,.0f} shares)")
+        st.write(f"Dividend Yield: **{pd_data['div_yield']:.1%}**")
+        st.markdown("---")
+        st.write(f"EPS Growth: **{pd_data['eps_growth_ann']:+.1%}** p.a.")
+        if pd_data["current_pe"] > 0:
+            st.write(f"Current P/E: **{pd_data['current_pe']:.1f}x**")
+        st.markdown("---")
+        total_return = pd_data["revenue_growth_ann"] + pd_data["margin_effect_ann"] + pd_data["buyback_ann"] + pd_data["div_yield"]
+        
+        # Verdict on quality of returns
+        organic = pd_data["revenue_growth_ann"] + pd_data["margin_effect_ann"]
+        financial = pd_data["buyback_ann"] + pd_data["div_yield"]
+        if abs(total_return) > 0.001:
+            organic_pct = organic / total_return * 100 if total_return != 0 else 0
+            st.write(f"**{organic_pct:.0f}% fundamental** (rev + margin) vs **{100-organic_pct:.0f}% financial** (buyback + div)")
+
 # ── Sensitivity ───────────────────────────────────────────────────────────────
 st.markdown("---")
 st.subheader("Sensitivity: Implied Growth (WACC × Terminal Growth)")
@@ -222,6 +296,7 @@ with st.expander("Model Inputs"):
         st.write(f"3Y Rev CAGR: {hp.revenue_cagr_3y:.1%}" if hp.revenue_cagr_3y else "3Y CAGR: N/A")
         st.write(f"Max Growth: {hp.max_revenue_growth:.1%}" if hp.max_revenue_growth else "N/A")
         st.write(f"ROIC: {hp.median_roic:.1%}" if hp.median_roic else "N/A")
+        st.caption("Note: Only historical annual data (HC block) is used. LTM and FY1 Estimate rows are not yet incorporated into the model.")
 
 # ── Warnings ──────────────────────────────────────────────────────────────────
 warnings = r.get("validation_warnings", [])
