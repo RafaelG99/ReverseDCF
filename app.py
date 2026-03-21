@@ -445,33 +445,81 @@ with tab_forward:
             "EBIT": "{:,.0f}", "NOPAT": "{:,.0f}", "FCFF": "{:,.0f}", "PV(FCFF)": "{:,.0f}",
         }), use_container_width=True)
 
-        # Valuation Bridge
+        # Valuation Bridge + Return Decomposition
         st.markdown("---")
-        st.subheader("Valuation Bridge")
+        st.subheader("Valuation Bridge & Return Decomposition")
+        
         bridge_l, bridge_r = st.columns([2, 3])
         with bridge_l:
-            st.write(f"PV Explicit Period: **{pv_explicit:,.0f}**")
-            st.write(f"PV Terminal Value: **{pv_tv:,.0f}**")
-            st.write(f"= Enterprise Value: **{total_ev:,.0f}**")
+            st.markdown("**EV → Equity → Fair Price**")
+            st.write(f"PV Explicit: **{pv_explicit:,.0f}**")
+            st.write(f"PV Terminal: **{pv_tv:,.0f}**")
+            st.write(f"= EV: **{total_ev:,.0f}**")
             st.write(f"− Net Debt: {model.net_debt:,.0f}")
-            st.write(f"− Minority Interest: {model.minority:,.0f}")
-            st.write(f"= Equity Value: **{fair_equity:,.0f}**")
+            st.write(f"− MI: {model.minority:,.0f}")
+            st.write(f"= Equity: **{fair_equity:,.0f}**")
             st.write(f"÷ Shares: {model.shares:,.1f}")
             st.write(f"= **Fair Price: {fair_price:,.1f}** ({upside:+.1%})")
+        
         with bridge_r:
+            # Return decomposition: Current Price → Fair Price
+            # What drives the gap?
+            # 1. Revenue Growth: how much of the upside comes from revenue growing?
+            # 2. Margin Expansion: EBIT margin today vs your Y5 target
+            # 3. Multiple: implied EV/EBIT today vs your implied EV/EBIT
+            
+            current_ev = model.market_ev
+            current_ebit = model.base_ebit if model.base_ebit else model.base_revenue * model.ebit_margin
+            current_ev_ebit = current_ev / current_ebit if current_ebit else 0
+            
+            # Your projections
+            final_rev = projection_rows[-1]["Revenue"]
+            final_ebit = projection_rows[-1]["EBIT"]
+            your_ev_ebit = total_ev / final_ebit if final_ebit else 0
+            
+            rev_change = (final_rev / model.base_revenue - 1) if model.base_revenue else 0
+            margin_change = avg_my_margin - model.ebit_margin
+            multiple_change = your_ev_ebit - current_ev_ebit
+            
+            # Approximate decomposition of fair price
+            # Fair Price ≈ Current × (1 + Rev Growth) × (1 + Margin Effect) × (1 + Multiple Effect)
+            rev_effect = rev_change  # total revenue growth over projection period
+            margin_effect = (avg_my_margin / model.ebit_margin - 1) if model.ebit_margin else 0
+            
+            st.markdown("**What drives the difference?**")
+            
+            decomp_items = [
+                ("Revenue Growth", f"{rev_change:+.0%} over {n_years}Y", 
+                 f"Revenue grows from {model.base_revenue:,.0f} to {final_rev:,.0f}"),
+                ("Margin Change", f"{model.ebit_margin:.1%} → {avg_my_margin:.1%} ({margin_change:+.1%}pp)",
+                 "Higher margins = more profit per CHF revenue" if margin_change > 0 else "Lower margins = less profit per CHF revenue" if margin_change < 0 else "Margins unchanged"),
+                ("EV/EBIT Multiple", f"{current_ev_ebit:.1f}x → {your_ev_ebit:.1f}x ({your_ev_ebit - current_ev_ebit:+.1f}x)",
+                 "Multiple expansion = market pays more per CHF profit" if your_ev_ebit > current_ev_ebit else "Multiple contraction = market pays less per CHF profit" if your_ev_ebit < current_ev_ebit else "Multiple unchanged"),
+            ]
+            
+            for label, value, explanation in decomp_items:
+                st.write(f"**{label}:** {value}")
+                st.caption(explanation)
+            
+            # Waterfall: Current EV → Your EV
+            ev_from_rev = current_ev * rev_change  # EV increase from revenue alone
+            ev_from_margin = current_ev * margin_effect  # EV increase from margin
+            ev_residual = total_ev - current_ev - ev_from_rev - ev_from_margin  # multiple/other
+            
             fig_bridge = go.Figure(go.Waterfall(
-                x=["PV Explicit", "PV Terminal", "Enterprise Value", "− Net Debt", "− MI", "Equity Value"],
-                y=[pv_explicit, pv_tv, 0, -model.net_debt, -model.minority, 0],
-                measure=["relative", "relative", "total", "relative", "relative", "total"],
+                x=["Current EV", "Revenue<br>Growth", "Margin<br>Change", "Multiple<br>& Other", "Your EV"],
+                y=[current_ev, ev_from_rev, ev_from_margin, ev_residual, 0],
+                measure=["absolute", "relative", "relative", "relative", "total"],
                 connector={"line": {"color": "#ccc"}},
                 increasing={"marker": {"color": C_GREEN}},
                 decreasing={"marker": {"color": C_RED}},
                 totals={"marker": {"color": C_TEAL}},
-                text=[f"{pv_explicit:,.0f}", f"{pv_tv:,.0f}", f"{total_ev:,.0f}",
-                      f"{-model.net_debt:,.0f}", f"{-model.minority:,.0f}", f"{fair_equity:,.0f}"],
+                text=[f"{current_ev:,.0f}", f"{ev_from_rev:+,.0f}", f"{ev_from_margin:+,.0f}", 
+                      f"{ev_residual:+,.0f}", f"{total_ev:,.0f}"],
                 textposition="outside", textfont=dict(size=11),
             ))
-            fig_bridge.update_layout(height=350, showlegend=False, plot_bgcolor="white", font=dict(family="Arial"))
+            fig_bridge.update_layout(height=380, showlegend=False, plot_bgcolor="white", 
+                                    font=dict(family="Arial"), yaxis_title="Enterprise Value")
             st.plotly_chart(fig_bridge, use_container_width=True)
 
     except Exception as e:
