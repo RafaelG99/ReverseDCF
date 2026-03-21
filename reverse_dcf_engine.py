@@ -233,7 +233,11 @@ class ReverseDCF:
         if "WACC" in xl.sheet_names:
             params = cls._parse_wacc_sheet_single(xl, params)
 
-        ticker = Path(path).stem.replace("reverse_dcf_", "").replace("reverse_dcf", "TICKER")
+        # Extract ticker from B2 cell (actual BBG ticker)
+        ticker_raw = raw.iloc[1, 1] if len(raw) > 1 and pd.notna(raw.iloc[1, 1]) else ""
+        ticker = str(ticker_raw).replace(" Equity", "").replace(" Index", "").strip()
+        if not ticker:
+            ticker = Path(path).stem.replace("reverse_dcf_", "").replace("reverse_dcf-", "").replace("reverse_dcf", "TICKER")
         return cls(hist, current, params, ticker, ltm_data=ltm_data)
 
         # Read HC block: header row at hc_start, data below
