@@ -42,7 +42,10 @@ we = c2.number_input("Eq. Weight (%)", value=round(p.equity_weight*100,0), step=
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Terminal")
-tg = st.sidebar.slider("Terminal Growth (%)", 0.0, 4.0, round(p.terminal_growth*100,1), 0.1) / 100
+# Default Tg: use inflation (~1.5%) not nominal GDP — more conservative and stable
+tg_default = min(round(p.terminal_growth*100, 1), 1.5)  # cap at 1.5% if linked GDP is higher
+tg = st.sidebar.slider("Terminal Growth (%)", 0.0, 4.0, tg_default, 0.1,
+                        help="Default: ~inflation. Nominal GDP is aggressive for mature companies.") / 100
 proj = st.sidebar.slider("Projection Years", 3, 10, p.projection_years)
 
 # BBG WACC as default, with manual override option
@@ -114,7 +117,12 @@ with tab_reverse:
         v_action = f"WACC ({wacc:.2%}) is too close to Terminal Growth ({tg:.2%}). The {wacc_tg_spread:.1%} spread makes the DCF output meaningless. Increase WACC or lower Terminal Growth."
     elif ig < -0.10:
         verdict, v_color = "CHECK INPUTS", C_RED
-        v_action = f"Implied decline of {ig:.1%} p.a. is extreme. Likely a data issue (wrong WACC, half-year data, or post-M&A distortion). Verify the inputs before drawing conclusions."
+        ev0 = model._ev_from_growth(0.0)
+        ev_ratio = ev0 / model.market_ev if model.market_ev else 0
+        if ev_ratio > 2:
+            v_action = f"Even at 0% growth, the DCF value is {ev_ratio:.1f}x the market EV. This typically means the WACC ({wacc:.2%}) is too low. Try increasing WACC to 7-8% in the sidebar. BBG WACC can be unreliable for high-D&A or high-leverage companies."
+        else:
+            v_action = f"Implied decline of {ig:.1%} p.a. is extreme. Check for: half-year vs full-year data, post-M&A revenue distortion, or wrong currency units."
     elif ig < -0.03 and cagr > 0.02:
         verdict, v_color = "POTENTIALLY UNDERVALUED", C_GREEN
         v_action = f"Market prices in {ig:.1%} annual decline, but historically the company grew {cagr:.1%} p.a. If the business is stable, this looks cheap."
