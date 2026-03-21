@@ -232,7 +232,12 @@ with tab_reverse:
     if warnings:
         with st.expander(f"Data Notes ({len(warnings)})"):
             for w in warnings:
-                st.info(w) if "INFO" in w else st.warning(w) if "WARNING" in w else st.error(w)
+                if "CRITICAL" in w:
+                    st.error(w)
+                elif "WARNING" in w:
+                    st.warning(w)
+                else:
+                    st.info(w)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
