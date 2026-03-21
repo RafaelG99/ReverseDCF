@@ -78,25 +78,31 @@ with tab_reverse:
     reasons = []
     if hp.max_revenue_growth and ig > hp.max_revenue_growth > 0:
         reasons.append(f"Implied growth ({ig:.1%}) exceeds historical max ({hp.max_revenue_growth:.1%})")
-    if hp.revenue_cagr_5y and hp.revenue_cagr_5y != 0 and abs(ig) > abs(hp.revenue_cagr_5y) * 3:
-        reasons.append(f"Implied growth is {abs(ig/hp.revenue_cagr_5y):.0f}× the 5Y CAGR ({hp.revenue_cagr_5y:.1%})")
+    if ig > 0 and hp.revenue_cagr_5y and hp.revenue_cagr_5y > 0 and ig > hp.revenue_cagr_5y * 3:
+        reasons.append(f"Implied growth is {ig/hp.revenue_cagr_5y:.0f}x the 5Y CAGR ({hp.revenue_cagr_5y:.1%})")
     if tv_pct > 0.90:
         reasons.append(f"TV = {tv_pct:.0%} of EV (high uncertainty)")
     if roic_sp < 0:
         reasons.append("ROIC < WACC — growth destroys value")
+    if ig < 0 and hp.revenue_cagr_5y and hp.revenue_cagr_5y > 0:
+        reasons.append(f"Market implies decline ({ig:.1%}) despite positive historical growth ({hp.revenue_cagr_5y:.1%})")
 
-    if red_flags >= 3:
+    # Verdict: check undervalued FIRST (negative implied + positive history)
+    if ig < 0 and hp.revenue_cagr_5y and hp.revenue_cagr_5y > 0.01:
+        verdict, v_color = "POTENTIALLY UNDERVALUED", C_GREEN
+        v_action = f"Market prices in {ig:.1%} annual decline, but historically the company grew {hp.revenue_cagr_5y:.1%} p.a. If the business is stable, this looks cheap."
+    elif ig < 0 and (not hp.revenue_cagr_5y or hp.revenue_cagr_5y <= 0):
+        verdict, v_color = "MARKET EXPECTS DECLINE", C_AMBER
+        v_action = "Market prices in revenue decline. Historical growth was also weak — the market may be right."
+    elif red_flags >= 3:
         verdict, v_color = "OVERPRICED", C_RED
         v_action = "Market prices in growth well beyond history. Needs a strong catalyst to justify."
     elif red_flags >= 2:
         verdict, v_color = "LIKELY OVERPRICED", C_CORAL
         v_action = "Expectations are stretched. Needs a clear reason why the future differs from the past."
-    elif red_flags == 0 and roic_sp > 0 and ig >= 0:
+    elif red_flags == 0 and roic_sp > 0:
         verdict, v_color = "FAIRLY VALUED", C_GREEN
         v_action = "Expectations are achievable. Returns depend on execution vs. these expectations."
-    elif ig < 0 and hp.revenue_cagr_5y and hp.revenue_cagr_5y >= 0:
-        verdict, v_color = "POTENTIALLY UNDERVALUED", C_GREEN
-        v_action = "Market prices in decline. Could be an opportunity if fundamentals hold."
     else:
         verdict, v_color = "FAIR VALUE RANGE", C_AMBER
         v_action = "Mixed signals. Dig deeper into the flags below."
@@ -315,7 +321,7 @@ with tab_forward:
         df_defaults,
         use_container_width=True,
         num_rows="fixed",
-        key="fwd_table",
+        key=f"fwd_table_{model.ticker}",
     )
 
     # ── Parse edited table and compute DCF ────────────────────────────────────
