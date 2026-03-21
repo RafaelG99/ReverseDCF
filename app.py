@@ -45,8 +45,21 @@ st.sidebar.subheader("Terminal")
 tg = st.sidebar.slider("Terminal Growth (%)", 0.0, 4.0, round(p.terminal_growth*100,1), 0.1) / 100
 proj = st.sidebar.slider("Projection Years", 3, 10, p.projection_years)
 
-wacc_coe = rf + beta * erp
-wacc = we * wacc_coe + (1 - we) * cod * (1 - tax)
+# BBG WACC as default, with manual override option
+bbg_wacc_raw = model._safe_numeric(model.current.get("BBG_WACC"))
+if bbg_wacc_raw and bbg_wacc_raw > 1:
+    bbg_wacc_raw = bbg_wacc_raw / 100
+bbg_wacc_available = bbg_wacc_raw and 0.01 < bbg_wacc_raw < 0.25
+
+if bbg_wacc_available:
+    wacc = st.sidebar.number_input("WACC (%)", value=round(bbg_wacc_raw*100, 2), step=0.25, format="%.2f",
+                                    help="Default: Bloomberg WACC. Override manually if needed.") / 100
+    st.sidebar.caption(f"BBG WACC: {bbg_wacc_raw:.2%}")
+else:
+    wacc_coe = rf + beta * erp
+    wacc = we * wacc_coe + (1 - we) * cod * (1 - tax)
+    st.sidebar.caption(f"WACC (own CAPM): {wacc:.2%}")
+
 st.sidebar.markdown(f"**WACC: {wacc:.2%}**")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -65,6 +78,7 @@ with tab_reverse:
     params = DCFParams(risk_free=rf, erp=erp, beta=beta, cost_of_debt_pretax=cod, tax_rate=tax,
         equity_weight=we, debt_weight=1-we, terminal_growth=tg, terminal_ebit_margin=tm_r,
         projection_years=proj, bull_growth_add=bull, bear_growth_add=bear)
+    params.wacc_override = wacc  # Use the sidebar WACC (BBG or manual)
     model.params = params
     model._prepare_data()
     r = model.run()
