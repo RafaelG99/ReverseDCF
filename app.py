@@ -113,7 +113,9 @@ with tab_reverse:
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Price", f"{r['price']:,.2f}")
     k2.metric("Implied Growth (p.a.)", f"{ig:.1%}", delta=f"vs {hp.revenue_cagr_5y:.1%} 5Y" if hp.revenue_cagr_5y else None)
-    k3.metric("WACC", f"{r['wacc']:.2%}")
+    bbg_wacc_display = getattr(model, 'bbg_wacc', None)
+    k3.metric("WACC", f"{r['wacc']:.2%}", 
+              delta=f"BBG: {bbg_wacc_display:.2%}" if bbg_wacc_display else None, delta_color="off")
     k4.metric("TV % of EV", f"{tv_pct:.0%}")
     k5.metric("ROIC Spread", f"{roic_sp:+.1%}", delta="Creates Value" if r['roic_gate']['value_creating'] else "Destroys Value",
               delta_color="normal" if r['roic_gate']['value_creating'] else "inverse")
