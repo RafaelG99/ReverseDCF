@@ -796,17 +796,28 @@ class ReverseDCF:
         self.nwc_pct = (self.params.nwc_pct_revenue_override
                        or (nwc / self.base_revenue if self.base_revenue else 0.0))
 
-        # Tax rate from data if not overridden
+        # Tax rate: median effective tax rate (more robust than avg or last year)
         if "Tax_Expense" in h and "EBIT" in h:
             tax_exp = h["Tax_Expense"].dropna()
             ebit_vals = h["EBIT"].dropna()
-            if len(tax_exp) > 0 and len(ebit_vals) > 0:
+            if len(tax_exp) > 1 and len(ebit_vals) > 1:
+                # Compute effective tax rate per year, take median
+                min_len = min(len(tax_exp), len(ebit_vals))
+                eff_taxes = []
+                for i in range(min_len):
+                    if ebit_vals.iloc[i] != 0:
+                        et = tax_exp.iloc[i] / ebit_vals.iloc[i]
+                        if 0 < et < 0.50:
+                            eff_taxes.append(et)
+                if eff_taxes:
+                    median_tax = float(np.median(eff_taxes))
+                    self.params.tax_rate = median_tax
+                    self._validation_warnings.append(
+                        f"INFO: Tax rate = {median_tax:.1%} (median of {len(eff_taxes)} years, range {min(eff_taxes):.1%}–{max(eff_taxes):.1%})")
+            elif len(tax_exp) > 0 and len(ebit_vals) > 0:
                 eff_tax = (tax_exp.iloc[-1] / ebit_vals.iloc[-1]) if ebit_vals.iloc[-1] != 0 else 0.20
                 if 0 < eff_tax < 0.50:
                     self.params.tax_rate = eff_tax
-                elif eff_tax >= 0.50 or eff_tax <= 0:
-                    self._validation_warnings.append(
-                        f"WARNING: Effective tax rate ({eff_tax:.1%}) out of bounds — using default {self.params.tax_rate:.1%}")
 
         # Enterprise value from market data
         price = self._safe_numeric(self.current.get("Price"), 0)
@@ -829,6 +840,30 @@ class ReverseDCF:
         ev_calc = self._safe_numeric(self.current.get("EV_Calc"))
         if ev_calc and self.base_revenue and ev_calc / self.base_revenue > 5000:
             ev_calc = ev_calc / 1e6
+
+        # ── BBG WACC AS DEFAULT ────────────────────────────────────────────
+        # Use Bloomberg's WACC as primary, fall back to our CAPM calculation
+        bbg_wacc_raw = self._safe_numeric(self.current.get("BBG_WACC"))
+        if bbg_wacc_raw and bbg_wacc_raw > 1:  # BBG gives as percentage (6.98 not 0.0698)
+            bbg_wacc_raw = bbg_wacc_raw / 100
+        
+        if bbg_wacc_raw and 0.01 < bbg_wacc_raw < 0.25 and self.params.wacc_override is None:
+            own_wacc = self.params.wacc
+            self.params.wacc_override = bbg_wacc_raw
+            self._validation_warnings.append(
+                f"INFO: Using BBG WACC ({bbg_wacc_raw:.2%}) as default. Own CAPM: {own_wacc:.2%}. Override in sidebar if needed.")
+        
+        self.bbg_wacc = bbg_wacc_raw  # store for display
+
+        # ── AUTO EQUITY WEIGHT ────────────────────────────────────────────────
+        # Calculate from Market Cap and Total Debt (market values)
+        h = self.hist
+        last_debt = h.get("Total_Debt", pd.Series(dtype=float)).dropna()
+        if market_cap > 0 and len(last_debt) > 0 and last_debt.iloc[-1] > 0:
+            auto_eq_weight = market_cap / (market_cap + last_debt.iloc[-1])
+            if 0.3 < auto_eq_weight < 1.0:
+                self.params.equity_weight = auto_eq_weight
+                self.params.debt_weight = 1 - auto_eq_weight
 
         # ROIC: Bloomberg gives as percentage (10.2 = 10.2%), engine needs decimal (0.102)
         roic_val = self._safe_numeric(self.current.get("ROIC"))
