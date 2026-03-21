@@ -88,6 +88,7 @@ with tab_reverse:
     red_flags = sum(1 for c in r["plausibility"] if c["flag"] == "🔴")
     tv_pct = r["tv_decomposition"]["tv_pct"]
     roic_sp = r["roic_gate"]["spread"]
+    wacc_tg_spread = wacc - tg
 
     reasons = []
     if hp.max_revenue_growth and ig > hp.max_revenue_growth > 0:
@@ -98,23 +99,40 @@ with tab_reverse:
         reasons.append(f"TV = {tv_pct:.0%} of EV (high uncertainty)")
     if roic_sp < 0:
         reasons.append("ROIC < WACC — growth destroys value")
-    if ig < 0 and hp.revenue_cagr_5y and hp.revenue_cagr_5y > 0:
+    if ig < -0.03 and hp.revenue_cagr_5y and hp.revenue_cagr_5y > 0.02:
         reasons.append(f"Market implies decline ({ig:.1%}) despite positive historical growth ({hp.revenue_cagr_5y:.1%})")
+    if wacc_tg_spread < 0.02:
+        reasons.append(f"WACC-Tg spread only {wacc_tg_spread:.1%} — result highly sensitive to assumptions")
 
-    # Verdict: check undervalued FIRST (negative implied + positive history)
-    if ig < 0 and hp.revenue_cagr_5y and hp.revenue_cagr_5y > 0.01:
+    # Verdict logic:
+    # 1. First check if result is unreliable (spread too tight)
+    # 2. Then classify based on implied growth vs history
+    cagr = hp.revenue_cagr_5y or 0
+
+    if wacc_tg_spread < 0.02:
+        verdict, v_color = "⚠ RESULT UNRELIABLE", C_RED
+        v_action = f"WACC ({wacc:.2%}) is too close to Terminal Growth ({tg:.2%}). The {wacc_tg_spread:.1%} spread makes the DCF output meaningless. Increase WACC or lower Terminal Growth."
+    elif ig < -0.10:
+        verdict, v_color = "CHECK INPUTS", C_RED
+        v_action = f"Implied decline of {ig:.1%} p.a. is extreme. Likely a data issue (wrong WACC, half-year data, or post-M&A distortion). Verify the inputs before drawing conclusions."
+    elif ig < -0.03 and cagr > 0.02:
         verdict, v_color = "POTENTIALLY UNDERVALUED", C_GREEN
-        v_action = f"Market prices in {ig:.1%} annual decline, but historically the company grew {hp.revenue_cagr_5y:.1%} p.a. If the business is stable, this looks cheap."
-    elif ig < 0 and (not hp.revenue_cagr_5y or hp.revenue_cagr_5y <= 0):
-        verdict, v_color = "MARKET EXPECTS DECLINE", C_AMBER
-        v_action = "Market prices in revenue decline. Historical growth was also weak — the market may be right."
-    elif red_flags >= 3:
+        v_action = f"Market prices in {ig:.1%} annual decline, but historically the company grew {cagr:.1%} p.a. If the business is stable, this looks cheap."
+    elif -0.03 <= ig <= 0.03:
+        # Near zero — fairly valued zone
+        if cagr > 0.05:
+            verdict, v_color = "POTENTIALLY UNDERVALUED", C_GREEN
+            v_action = f"Market implies roughly flat growth ({ig:.1%}), but historically the company grew {cagr:.1%} p.a. Modest expectations — could be an opportunity."
+        else:
+            verdict, v_color = "FAIRLY VALUED", C_AMBER
+            v_action = f"Market implies {ig:.1%} growth — broadly in line with the historical {cagr:.1%} trajectory. No strong mispricing signal."
+    elif ig > 0 and red_flags >= 3:
         verdict, v_color = "OVERPRICED", C_RED
         v_action = "Market prices in growth well beyond history. Needs a strong catalyst to justify."
-    elif red_flags >= 2:
+    elif ig > 0 and red_flags >= 2:
         verdict, v_color = "LIKELY OVERPRICED", C_CORAL
         v_action = "Expectations are stretched. Needs a clear reason why the future differs from the past."
-    elif red_flags == 0 and roic_sp > 0:
+    elif ig > 0 and red_flags == 0 and roic_sp > 0:
         verdict, v_color = "FAIRLY VALUED", C_GREEN
         v_action = "Expectations are achievable. Returns depend on execution vs. these expectations."
     else:
