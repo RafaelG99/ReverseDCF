@@ -1,5 +1,5 @@
 """
-Reverse DCF Dashboard — Reverse + Forward DCF
+DCF Engine — Reverse + Forward DCF
 """
 import streamlit as st
 import pandas as pd
@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from reverse_dcf_engine import ReverseDCF, DCFParams
 import tempfile
 
-st.set_page_config(page_title="Reverse DCF", page_icon="📊", layout="wide")
+st.set_page_config(page_title="DCF Engine", page_icon="📊", layout="wide")
 C_TEAL, C_CORAL, C_AMBER, C_GREEN, C_RED = "#003850", "#F26B43", "#FBAE40", "#2ECC71", "#E74C3C"
 
 # ── File Upload ───────────────────────────────────────────────────────────────
@@ -43,16 +43,13 @@ we = c2.number_input("Eq. Weight (%)", value=round(p.equity_weight*100,0), step=
 st.sidebar.markdown("---")
 st.sidebar.subheader("Terminal")
 tg = st.sidebar.slider("Terminal Growth (%)", 0.0, 4.0, round(p.terminal_growth*100,1), 0.1) / 100
-tm = st.sidebar.slider("Terminal EBIT Margin (%)", 5.0, 40.0, round((p.terminal_ebit_margin or 0.15)*100,1), 0.5) / 100
 proj = st.sidebar.slider("Projection Years", 3, 10, p.projection_years)
 
-# Compute WACC
 wacc_coe = rf + beta * erp
-wacc_cod_at = cod * (1 - tax)
-wacc = we * wacc_coe + (1 - we) * wacc_cod_at
-st.sidebar.markdown(f"**WACC: {wacc:.2%}** (CoE: {wacc_coe:.2%})")
+wacc = we * wacc_coe + (1 - we) * cod * (1 - tax)
+st.sidebar.markdown(f"**WACC: {wacc:.2%}**")
 
-# ── TABS ──────────────────────────────────────────────────────────────────────
+# ── Tabs ──────────────────────────────────────────────────────────────────────
 tab_reverse, tab_forward = st.tabs(["🔍 Reverse DCF", "🎯 Forward DCF (My View)"])
 
 
@@ -60,11 +57,13 @@ tab_reverse, tab_forward = st.tabs(["🔍 Reverse DCF", "🎯 Forward DCF (My Vi
 # TAB 1: REVERSE DCF
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_reverse:
+    tm_r = st.sidebar.slider("Terminal EBIT Margin — Reverse (%)", 5.0, 45.0,
+        round((p.terminal_ebit_margin or 0.15)*100, 1), 0.5, key="tm_r") / 100
     bull = st.sidebar.slider("Bull Offset (pp)", 0.0, 10.0, 3.0, 0.5, key="bull_r") / 100
     bear = st.sidebar.slider("Bear Offset (pp)", -10.0, 0.0, -3.0, 0.5, key="bear_r") / 100
 
     params = DCFParams(risk_free=rf, erp=erp, beta=beta, cost_of_debt_pretax=cod, tax_rate=tax,
-        equity_weight=we, debt_weight=1-we, terminal_growth=tg, terminal_ebit_margin=tm,
+        equity_weight=we, debt_weight=1-we, terminal_growth=tg, terminal_ebit_margin=tm_r,
         projection_years=proj, bull_growth_add=bull, bear_growth_add=bear)
     model.params = params
     model._prepare_data()
@@ -82,56 +81,45 @@ with tab_reverse:
     if hp.revenue_cagr_5y and hp.revenue_cagr_5y != 0 and abs(ig) > abs(hp.revenue_cagr_5y) * 3:
         reasons.append(f"Implied growth is {abs(ig/hp.revenue_cagr_5y):.0f}× the 5Y CAGR ({hp.revenue_cagr_5y:.1%})")
     if tv_pct > 0.90:
-        reasons.append(f"Terminal Value = {tv_pct:.0%} of EV (high uncertainty)")
+        reasons.append(f"TV = {tv_pct:.0%} of EV (high uncertainty)")
     if roic_sp < 0:
-        reasons.append(f"ROIC < WACC — growth destroys value")
+        reasons.append("ROIC < WACC — growth destroys value")
 
     if red_flags >= 3:
-        verdict, v_color, v_icon = "OVERPRICED", C_RED, "🔴"
-        v_detail = "Market expectations significantly exceed what the company has historically delivered."
-        v_action = "The market prices in growth well beyond the historical track record. Requires a strong catalyst thesis to justify."
+        verdict, v_color = "OVERPRICED", C_RED
+        v_action = "Market prices in growth well beyond history. Needs a strong catalyst to justify."
     elif red_flags >= 2:
-        verdict, v_color, v_icon = "LIKELY OVERPRICED", C_CORAL, "🟠"
-        v_detail = "Implied growth is stretched relative to historical fundamentals."
-        v_action = "Market expects meaningfully higher growth than history suggests. Needs a clear reason why the future will differ."
+        verdict, v_color = "LIKELY OVERPRICED", C_CORAL
+        v_action = "Expectations are stretched. Needs a clear reason why the future differs from the past."
     elif red_flags == 0 and roic_sp > 0 and ig >= 0:
-        verdict, v_color, v_icon = "FAIRLY VALUED", C_GREEN, "🟢"
-        v_detail = "Implied expectations are broadly consistent with the historical track record."
-        v_action = "Expectations are achievable based on history. Returns will depend on execution vs. these expectations."
+        verdict, v_color = "FAIRLY VALUED", C_GREEN
+        v_action = "Expectations are achievable. Returns depend on execution vs. these expectations."
     elif ig < 0 and hp.revenue_cagr_5y and hp.revenue_cagr_5y >= 0:
-        verdict, v_color, v_icon = "POTENTIALLY UNDERVALUED", C_GREEN, "🟢"
-        v_detail = "Market implies revenue decline — potential opportunity if fundamentals hold."
-        v_action = "Market prices in deterioration. If you believe the business is stable, this could be an opportunity."
+        verdict, v_color = "POTENTIALLY UNDERVALUED", C_GREEN
+        v_action = "Market prices in decline. Could be an opportunity if fundamentals hold."
     else:
-        verdict, v_color, v_icon = "FAIR VALUE RANGE", C_AMBER, "🟡"
-        v_detail = "Mixed signals — some implied expectations stretched, others reasonable."
-        v_action = "No clear mispricing signal. Dig deeper into the specific flags below."
+        verdict, v_color = "FAIR VALUE RANGE", C_AMBER
+        v_action = "Mixed signals. Dig deeper into the flags below."
 
     st.title(f"Reverse DCF: {r['ticker']}")
-
     st.markdown(f"""
-    <div style="background-color: {v_color}15; border-left: 5px solid {v_color};
-                padding: 20px 24px; border-radius: 4px; margin-bottom: 20px;">
-        <span style="font-size: 28px; font-weight: bold; color: {v_color};">{v_icon} {verdict}</span><br>
-        <span style="font-size: 18px; color: #333; line-height: 1.6;">
-            Market implies <b>{ig:.1%} p.a. revenue growth</b> over {proj} years to justify {r['price']:,.2f}. {v_detail}
-        </span>
+    <div style="background-color: {v_color}15; border-left: 5px solid {v_color}; padding: 20px 24px; border-radius: 4px; margin-bottom: 20px;">
+        <span style="font-size: 28px; font-weight: bold; color: {v_color};">{verdict}</span><br>
+        <span style="font-size: 18px; color: #333;">Market implies <b>{ig:.1%} p.a. revenue growth</b> over {proj} years to justify {r['price']:,.2f}.</span>
         <br><span style="font-size: 15px; color: #444;"><b>So what?</b> {v_action}</span>
         {"<br><span style='font-size: 13px; color: #666;'>" + " · ".join(reasons[:3]) + "</span>" if reasons else ""}
-    </div>
-    """, unsafe_allow_html=True)
+    </div>""", unsafe_allow_html=True)
 
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Price", f"{r['price']:,.2f}")
-    k2.metric("Implied Growth (p.a.)", f"{ig:.1%}", delta=f"vs {hp.revenue_cagr_5y:.1%} 5Y CAGR" if hp.revenue_cagr_5y else None)
+    k2.metric("Implied Growth (p.a.)", f"{ig:.1%}", delta=f"vs {hp.revenue_cagr_5y:.1%} 5Y" if hp.revenue_cagr_5y else None)
     k3.metric("WACC", f"{r['wacc']:.2%}")
     k4.metric("TV % of EV", f"{tv_pct:.0%}")
     k5.metric("ROIC Spread", f"{roic_sp:+.1%}", delta="Creates Value" if r['roic_gate']['value_creating'] else "Destroys Value",
               delta_color="normal" if r['roic_gate']['value_creating'] else "inverse")
-
     st.markdown("---")
 
-    # Scenario Fan + TV
+    # Scenario + TV
     left, right = st.columns([3, 2])
     with left:
         st.subheader("Scenario Fan")
@@ -139,14 +127,11 @@ with tab_reverse:
         prices = [sc[l]["fair_price"] for l in labels]; upsides = [sc[l]["upside_downside"] for l in labels]
         fig = go.Figure()
         fig.add_trace(go.Bar(x=labels, y=prices, marker_color=[C_RED, C_AMBER, C_GREEN],
-            text=[f"{p:,.1f}<br>({u:+.0%})" for p, u in zip(prices, upsides)],
-            textposition="outside", textfont=dict(size=14, color=C_TEAL)))
+            text=[f"{p:,.1f}<br>({u:+.0%})" for p, u in zip(prices, upsides)], textposition="outside", textfont=dict(size=14, color=C_TEAL)))
         fig.add_hline(y=r["price"], line_dash="dash", line_color=C_TEAL, line_width=2,
                       annotation_text=f"Current: {r['price']:,.2f}", annotation_position="bottom right")
         fig.update_layout(height=400, showlegend=False, yaxis_title="Fair Price", plot_bgcolor="white", font=dict(family="Arial"))
         st.plotly_chart(fig, use_container_width=True)
-        st.caption(f"Base = growth that justifies current price. Bear/Bull = ±{abs(bear)*100:.0f}pp offset.")
-
     with right:
         st.subheader("TV Decomposition")
         tv = r["tv_decomposition"]
@@ -155,29 +140,21 @@ with tab_reverse:
         fig2.update_layout(height=400, showlegend=False, font=dict(family="Arial"),
             annotations=[dict(text=f"TV<br>{tv['tv_pct']:.0%}", x=0.5, y=0.5, font_size=18, showarrow=False, font_color=C_CORAL)])
         st.plotly_chart(fig2, use_container_width=True)
-        if tv_pct > 0.85:
-            st.caption(f"⚠️ {tv_pct:.0%} depends on long-term assumptions. Use the sensitivity table to gauge the range.")
 
     st.markdown("---")
-
-    # Plausibility + ROIC
     cl, cr = st.columns(2)
     with cl:
         st.subheader("Plausibility Checks")
         for c in r["plausibility"]:
             st.write(f"{c['flag']} **{c['check']}**: implied {c['implied']} vs hist {c['historical']} ({c['ratio']})")
-        st.caption("🟢 <1.5× hist · 🟡 1.5–2× · 🔴 >2× or exceeds max")
+        st.caption("🟢 <1.5× · 🟡 1.5–2× · 🔴 >2× or exceeds max")
     with cr:
         st.subheader("ROIC Gate")
-        rg = r["roic_gate"]
-        st.write(rg["verdict"])
+        rg = r["roic_gate"]; st.write(rg["verdict"])
         reinvest = rg.get("implied_reinvestment_rate", np.nan)
         if not np.isnan(reinvest):
             st.write(f"Implied reinvestment rate: **{reinvest:.0%}**")
-            if reinvest > 1:
-                st.caption(f"Needs external financing — reinvesting {reinvest:.0%} of earnings.")
-            else:
-                st.caption(f"Reinvests {reinvest:.0%}, leaving {max(0,1-reinvest):.0%} for dividends/buybacks.")
+            st.caption(f"{'Needs external financing.' if reinvest > 1 else f'Reinvests {reinvest:.0%}, {max(0,1-reinvest):.0%} left for dividends/buybacks.'}")
         fig3 = go.Figure()
         fig3.add_trace(go.Bar(x=["ROIC", "WACC"], y=[rg["roic"], rg["wacc"]],
             marker_color=[C_GREEN if rg["value_creating"] else C_RED, C_TEAL],
@@ -190,29 +167,24 @@ with tab_reverse:
     pd_data = r.get("performance_decomposition", {})
     if pd_data.get("available"):
         st.subheader(f"Performance Decomposition ({pd_data['start_year']}–{pd_data['end_year']})")
-        st.caption("How was historical return generated?")
         pd_l, pd_r = st.columns([3, 2])
         with pd_l:
             comps = [("Revenue<br>Growth", pd_data["revenue_growth_ann"]), ("Margin<br>Effect", pd_data["margin_effect_ann"]),
                      ("Buyback<br>Yield", pd_data["buyback_ann"]), ("Dividend<br>Yield", pd_data["div_yield"])]
-            vals = [c[1] for c in comps]
-            fig_pd = go.Figure(go.Waterfall(x=[c[0] for c in comps], y=vals,
-                connector={"line": {"color": "#ccc"}}, increasing={"marker": {"color": C_GREEN}},
-                decreasing={"marker": {"color": C_RED}}, text=[f"{v:+.1%}" for v in vals],
-                textposition="outside", textfont=dict(size=13)))
-            total = sum(vals)
-            fig_pd.add_trace(go.Bar(x=["Total<br>Return"], y=[total], marker_color=C_TEAL,
-                text=[f"{total:+.1%}"], textposition="outside", textfont=dict(size=14, color=C_TEAL), width=0.5))
+            vals = [c[1] for c in comps]; total = sum(vals)
+            fig_pd = go.Figure(go.Waterfall(x=[c[0] for c in comps], y=vals, connector={"line": {"color": "#ccc"}},
+                increasing={"marker": {"color": C_GREEN}}, decreasing={"marker": {"color": C_RED}},
+                text=[f"{v:+.1%}" for v in vals], textposition="outside", textfont=dict(size=13)))
+            fig_pd.add_trace(go.Bar(x=["Total"], y=[total], marker_color=C_TEAL, text=[f"{total:+.1%}"],
+                textposition="outside", textfont=dict(size=14, color=C_TEAL), width=0.5))
             fig_pd.update_layout(height=400, showlegend=False, yaxis_tickformat=".0%", plot_bgcolor="white", font=dict(family="Arial"))
             st.plotly_chart(fig_pd, use_container_width=True)
         with pd_r:
             st.write(f"Revenue Growth: **{pd_data['revenue_growth_ann']:+.1%}** p.a.")
-            st.write(f"Margin Change: **{pd_data['margin_effect_ann']:+.1%}** p.a. ({pd_data['margin_first']:.1%} → {pd_data['margin_last']:.1%})")
-            st.write(f"Buyback Yield: **{pd_data['buyback_ann']:+.1%}** p.a.")
-            st.write(f"Dividend Yield: **{pd_data['div_yield']:.1%}**")
-            st.write(f"EPS Growth: **{pd_data['eps_growth_ann']:+.1%}** p.a.")
-            if pd_data["current_pe"] > 0:
-                st.write(f"P/E: **{pd_data['current_pe']:.1f}x**")
+            st.write(f"Margin: **{pd_data['margin_effect_ann']:+.1%}** p.a. ({pd_data['margin_first']:.1%} → {pd_data['margin_last']:.1%})")
+            st.write(f"Buyback: **{pd_data['buyback_ann']:+.1%}** p.a. ({pd_data['shares_first']:,.0f} → {pd_data['shares_last']:,.0f})")
+            st.write(f"Dividend: **{pd_data['div_yield']:.1%}**")
+            if pd_data["current_pe"] > 0: st.write(f"P/E: **{pd_data['current_pe']:.1f}x**")
             organic = pd_data["revenue_growth_ann"] + pd_data["margin_effect_ann"]
             if abs(total) > 0.001:
                 st.write(f"**{organic/total*100:.0f}% fundamental** vs **{(1-organic/total)*100:.0f}% financial**")
@@ -220,7 +192,7 @@ with tab_reverse:
     # Sensitivity
     st.markdown("---")
     st.subheader("Sensitivity: Implied Growth (WACC × Tg)")
-    st.caption("Green = low expectations (cheap). Red = high expectations (expensive). Find your WACC/Tg and ask: is that growth achievable?")
+    st.caption("Green = low implied growth (cheap). Red = high (expensive).")
     wacc_rng = np.arange(max(0.02, wacc-0.015), wacc+0.020, 0.005)
     tg_rng = np.arange(max(0.005, tg-0.01), tg+0.015, 0.005)
     rows = []
@@ -228,52 +200,39 @@ with tab_reverse:
         row = {}
         for t in tg_rng:
             p2 = DCFParams(risk_free=rf, erp=erp, beta=beta, cost_of_debt_pretax=cod, tax_rate=tax,
-                equity_weight=we, debt_weight=1-we, terminal_growth=t, projection_years=proj, terminal_ebit_margin=tm)
+                equity_weight=we, debt_weight=1-we, terminal_growth=t, projection_years=proj, terminal_ebit_margin=tm_r)
             p2.wacc_override = w
             m2 = ReverseDCF(model.hist, model.current, p2, ticker=r["ticker"])
             row[f"Tg={t:.1%}"] = m2.solve_implied_growth()
         row["WACC"] = w; rows.append(row)
-    sdf = pd.DataFrame(rows).set_index("WACC")
-    sdf.index = [f"{w:.1%}" for w in wacc_rng]
+    sdf = pd.DataFrame(rows).set_index("WACC"); sdf.index = [f"{w:.1%}" for w in wacc_rng]
     st.dataframe(sdf.style.format("{:.1%}").background_gradient(cmap="RdYlGn", axis=None), use_container_width=True)
 
-    # Model Inputs + Methodology
-    st.markdown("---")
+    # Expanders
     with st.expander("Model Inputs"):
         mi1, mi2, mi3 = st.columns(3)
         with mi1:
-            st.markdown("**FCFF Drivers**")
             fcff = model._fcff_from_revenue(model.base_revenue)
-            st.write(f"Base Revenue: {model.base_revenue:,.0f}")
-            st.write(f"EBIT Margin: {model.ebit_margin:.1%}")
-            st.write(f"D&A/Rev: {model.da_pct:.1%} · CapEx/Rev: {model.capex_pct:.1%}")
-            st.write(f"NWC/Rev: {model.nwc_pct:.1%} · Tax: {model.params.tax_rate:.1%}")
-            st.write(f"**Base FCFF: {fcff:,.0f}** ({fcff/model.base_revenue:.1%} margin)")
+            st.markdown("**FCFF Drivers**")
+            st.write(f"Revenue: {model.base_revenue:,.0f} · EBIT Margin: {model.ebit_margin:.1%}")
+            st.write(f"D&A: {model.da_pct:.1%} · CapEx: {model.capex_pct:.1%} · NWC: {model.nwc_pct:.1%} · Tax: {tax:.1%}")
+            st.write(f"**FCFF: {fcff:,.0f}** ({fcff/model.base_revenue:.1%})")
         with mi2:
             st.markdown("**Valuation**")
-            st.write(f"Market Cap: {model.market_cap:,.0f}")
-            st.write(f"Net Debt: {model.net_debt:,.0f} · MI: {model.minority:,.0f}")
+            st.write(f"MCap: {model.market_cap:,.0f} · Net Debt: {model.net_debt:,.0f} · MI: {model.minority:,.0f}")
             st.write(f"**EV: {model.market_ev:,.0f}** · Shares: {model.shares:,.1f}")
         with mi3:
             st.markdown("**Historical**")
-            st.write(f"5Y CAGR: {hp.revenue_cagr_5y:.1%}" if hp.revenue_cagr_5y else "5Y: N/A")
-            st.write(f"3Y CAGR: {hp.revenue_cagr_3y:.1%}" if hp.revenue_cagr_3y else "3Y: N/A")
-            st.write(f"Max Growth: {hp.max_revenue_growth:.1%}" if hp.max_revenue_growth else "N/A")
+            st.write(f"5Y CAGR: {hp.revenue_cagr_5y:.1%}" if hp.revenue_cagr_5y else "N/A")
+            st.write(f"Max: {hp.max_revenue_growth:.1%}" if hp.max_revenue_growth else "N/A")
             st.write(f"ROIC: {hp.median_roic:.1%}" if hp.median_roic else "N/A")
             st.caption(f"Base: {'LTM' if model.ltm_data.get('Revenue') else 'FY'}")
 
-    with st.expander("Verdict Methodology"):
-        st.markdown("**Thresholds:** 🔴 OVERPRICED: 3+ red flags · 🟠 LIKELY OVERPRICED: 2 · 🟢 FAIRLY VALUED: 0 flags + ROIC>WACC · 🟡 FAIR RANGE: mixed")
-        st.markdown("**Plausibility flags:** 🟢 <1.5× historical · 🟡 1.5–2× · 🔴 >2× or exceeds historical max")
-        st.caption("This is a screening tool, not a price target. Always cross-check with your own analysis.")
-
     warnings = r.get("validation_warnings", [])
     if warnings:
-        with st.expander(f"Data Validation ({len(warnings)} notes)"):
+        with st.expander(f"Data Notes ({len(warnings)})"):
             for w in warnings:
-                if "CRITICAL" in w: st.error(w)
-                elif "WARNING" in w: st.warning(w)
-                else: st.info(w)
+                st.info(w) if "INFO" in w else st.warning(w) if "WARNING" in w else st.error(w)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -281,171 +240,239 @@ with tab_reverse:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_forward:
     st.title(f"Forward DCF: {model.ticker}")
-    st.markdown("**Set your own assumptions → get your fair value → compare vs market and analyst consensus.**")
+    st.markdown("**Build your own projection → get your fair value → compare vs market.**")
 
-    # My View inputs
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("My View")
-    my_rev_growth = st.sidebar.slider("Revenue Growth (% p.a.)", -10.0, 40.0, 
-        round((hp.revenue_cagr_5y or 0.05)*100, 1), 0.5, key="fwd_rev") / 100
-    my_ebit_margin = st.sidebar.slider("Target EBIT Margin (%)", 5.0, 45.0,
-        round(model.ebit_margin*100, 1), 0.5, key="fwd_margin") / 100
-    my_capex = st.sidebar.slider("CapEx / Revenue (%)", 1.0, 15.0,
-        round(model.capex_pct*100, 1), 0.5, key="fwd_capex") / 100
+    # ── Editable Projection Table ─────────────────────────────────────────────
+    st.subheader("Projection Assumptions")
+    st.caption("Edit any cell. Defaults are based on the latest available data (LTM or last FY).")
 
-    # Forward DCF calculation
-    fwd_wacc = wacc
-    fwd_tg = tg
-    fwd_tm = tm
-    fwd_n = proj
+    n_years = proj
+    year_cols = [f"Y{i}" for i in range(1, n_years + 1)] + ["Terminal"]
+    
+    # Defaults: historical ratios carried forward
+    base_rev = model.base_revenue
+    base_margin = model.ebit_margin
+    hist_cagr = hp.revenue_cagr_5y if hp.revenue_cagr_5y else 0.05
 
-    # Project cash flows
-    rev = model.base_revenue
-    pv_explicit = 0.0
-    projection_table = []
+    # Build default projection
+    default_data = {
+        "Metric": [
+            "Revenue",
+            "Revenue Growth (%)",
+            "EBIT Margin (%)",
+            "CapEx / Rev (%)",
+            "D&A / Rev (%)",
+            "NWC / Rev (%)",
+            "Tax Rate (%)",
+        ],
+        "Base": [
+            round(base_rev, 0),
+            "—",
+            round(base_margin * 100, 1),
+            round(model.capex_pct * 100, 1),
+            round(model.da_pct * 100, 1),
+            round(model.nwc_pct * 100, 1),
+            round(tax * 100, 1),
+        ],
+    }
 
-    for t_yr in range(1, fwd_n + 1):
-        rev *= (1 + my_rev_growth)
-        # Linear margin fade from current to target
-        margin_t = model.ebit_margin + (my_ebit_margin - model.ebit_margin) * (t_yr / fwd_n)
-        ebit = rev * margin_t
-        nopat = ebit * (1 - tax)
-        da = rev * model.da_pct
-        capex = rev * my_capex
-        nwc = rev * abs(model.nwc_pct)
-        fcff = nopat + da - capex - nwc
-        pv = fcff / (1 + fwd_wacc) ** t_yr
-        pv_explicit += pv
-        projection_table.append({
-            "Year": t_yr,
-            "Revenue": rev,
-            "EBIT Margin": margin_t,
-            "EBIT": ebit,
-            "NOPAT": nopat,
-            "FCFF": fcff,
-            "PV(FCFF)": pv,
-        })
-
-    # Terminal value
-    terminal_fcff = rev * (1 + fwd_tg) * fwd_tm * (1 - tax) + rev * (1 + fwd_tg) * model.da_pct - rev * (1 + fwd_tg) * my_capex - rev * (1 + fwd_tg) * abs(model.nwc_pct)
-    tv_val = terminal_fcff / (fwd_wacc - fwd_tg)
-    pv_tv = tv_val / (1 + fwd_wacc) ** fwd_n
-    total_ev = pv_explicit + pv_tv
-
-    # Fair value
-    fair_equity = total_ev - model.net_debt - model.minority
-    fair_price = fair_equity / model.shares if model.shares else 0
-    upside = (fair_price / model.price - 1) if model.price else 0
-
-    # ANR target (from current data if available)
-    anr_target = model._safe_numeric(model.current.get("Consensus_EPS_FY1"))  # placeholder
-    # Try to get target price from current dict
-    best_target = model._safe_numeric(model.current.get("Best_Target_Price"))
-
-    # ── Display ───────────────────────────────────────────────────────────────
-    # Verdict
-    if upside > 0.15:
-        fwd_verdict, fwd_color = "UNDERVALUED", C_GREEN
-        fwd_text = f"Your assumptions imply **{upside:+.0%} upside**. The stock looks cheap if your view is correct."
-    elif upside > 0:
-        fwd_verdict, fwd_color = "SLIGHT UPSIDE", C_GREEN
-        fwd_text = f"Your assumptions imply **{upside:+.0%} upside**. Marginal — the market roughly agrees with your view."
-    elif upside > -0.15:
-        fwd_verdict, fwd_color = "SLIGHT DOWNSIDE", C_AMBER
-        fwd_text = f"Your assumptions imply **{upside:+.0%}**. The stock is slightly expensive relative to your view."
-    else:
-        fwd_verdict, fwd_color = "OVERVALUED", C_RED
-        fwd_text = f"Your assumptions imply **{upside:+.0%} downside**. The stock is expensive relative to your view."
-
-    st.markdown(f"""
-    <div style="background-color: {fwd_color}15; border-left: 5px solid {fwd_color};
-                padding: 20px 24px; border-radius: 4px; margin-bottom: 20px;">
-        <span style="font-size: 28px; font-weight: bold; color: {fwd_color};">🎯 {fwd_verdict}</span><br>
-        <span style="font-size: 18px; color: #333; line-height: 1.6;">
-            Your fair value: <b>{fair_price:,.1f}</b> vs current price {model.price:,.2f} ({upside:+.1%}).
-            {fwd_text}
-        </span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # KPIs
-    f1, f2, f3, f4 = st.columns(4)
-    f1.metric("Current Price", f"{model.price:,.2f}")
-    f2.metric("My Fair Value", f"{fair_price:,.1f}", delta=f"{upside:+.1%}")
-    f3.metric("My EV", f"{total_ev:,.0f}")
-    tv_fwd_pct = pv_tv / total_ev if total_ev else 0
-    f4.metric("TV %", f"{tv_fwd_pct:.0%}")
-
-    st.markdown("---")
-
-    # Assumptions vs Market
-    st.subheader("My View vs Market Expectations")
-    cmp_l, cmp_r = st.columns(2)
-    with cmp_l:
-        implied_g = r["implied_growth"]
-        fig_cmp = go.Figure()
-        fig_cmp.add_trace(go.Bar(
-            x=["Revenue Growth", "EBIT Margin"],
-            y=[my_rev_growth, my_ebit_margin],
-            name="My View", marker_color=C_TEAL,
-            text=[f"{my_rev_growth:.1%}", f"{my_ebit_margin:.1%}"], textposition="outside"))
-        fig_cmp.add_trace(go.Bar(
-            x=["Revenue Growth", "EBIT Margin"],
-            y=[implied_g, model.ebit_margin],
-            name="Market Implied", marker_color=C_CORAL,
-            text=[f"{implied_g:.1%}", f"{model.ebit_margin:.1%}"], textposition="outside"))
-        fig_cmp.update_layout(height=350, barmode="group", showlegend=True,
-            yaxis_tickformat=".0%", plot_bgcolor="white", font=dict(family="Arial"))
-        st.plotly_chart(fig_cmp, use_container_width=True)
-
-    with cmp_r:
-        st.markdown("**Comparison**")
-        st.write(f"**Your Revenue Growth:** {my_rev_growth:.1%} p.a.")
-        st.write(f"**Market Implied:** {implied_g:.1%} p.a.")
-        diff = my_rev_growth - implied_g
-        if diff > 0.02:
-            st.write(f"→ You are **more bullish** than the market (+{diff:.1%}pp)")
-        elif diff < -0.02:
-            st.write(f"→ You are **more bearish** than the market ({diff:.1%}pp)")
+    rev = base_rev
+    for i, col in enumerate(year_cols):
+        if col == "Terminal":
+            default_data[col] = [
+                "—",
+                round(tg * 100, 1),
+                round((p.terminal_ebit_margin or base_margin) * 100, 1),
+                round(model.capex_pct * 100, 1),
+                round(model.da_pct * 100, 1),
+                round(model.nwc_pct * 100, 1),
+                round(tax * 100, 1),
+            ]
         else:
-            st.write(f"→ You roughly **agree** with the market")
+            growth = round(hist_cagr * 100, 1)
+            rev_proj = rev * (1 + hist_cagr)
+            default_data[col] = [
+                round(rev_proj, 0),
+                growth,
+                round(base_margin * 100, 1),
+                round(model.capex_pct * 100, 1),
+                round(model.da_pct * 100, 1),
+                round(model.nwc_pct * 100, 1),
+                round(tax * 100, 1),
+            ]
+            rev = rev_proj
+
+    df_defaults = pd.DataFrame(default_data).set_index("Metric")
+
+    edited = st.data_editor(
+        df_defaults,
+        use_container_width=True,
+        num_rows="fixed",
+        key="fwd_table",
+    )
+
+    # ── Parse edited table and compute DCF ────────────────────────────────────
+    st.markdown("---")
+
+    try:
+        # Extract values from edited table
+        pv_explicit = 0.0
+        projection_rows = []
+        rev = base_rev
+
+        for i in range(n_years):
+            col = f"Y{i+1}"
+            rev_growth = float(edited.loc["Revenue Growth (%)", col]) / 100
+            margin = float(edited.loc["EBIT Margin (%)", col]) / 100
+            capex_pct = float(edited.loc["CapEx / Rev (%)", col]) / 100
+            da_pct = float(edited.loc["D&A / Rev (%)", col]) / 100
+            nwc_pct = float(edited.loc["NWC / Rev (%)", col]) / 100
+            tax_pct = float(edited.loc["Tax Rate (%)", col]) / 100
+
+            rev = rev * (1 + rev_growth)
+            ebit = rev * margin
+            nopat = ebit * (1 - tax_pct)
+            da = rev * da_pct
+            capex = rev * capex_pct
+            nwc = rev * abs(nwc_pct)
+            fcff = nopat + da - capex - nwc
+            pv = fcff / (1 + wacc) ** (i + 1)
+            pv_explicit += pv
+
+            projection_rows.append({
+                "Year": col,
+                "Revenue": rev,
+                "Growth": rev_growth,
+                "EBIT Margin": margin,
+                "EBIT": ebit,
+                "NOPAT": nopat,
+                "FCFF": fcff,
+                "PV(FCFF)": pv,
+            })
+
+        # Terminal
+        t_growth = float(edited.loc["Revenue Growth (%)", "Terminal"]) / 100
+        t_margin = float(edited.loc["EBIT Margin (%)", "Terminal"]) / 100
+        t_capex = float(edited.loc["CapEx / Rev (%)", "Terminal"]) / 100
+        t_da = float(edited.loc["D&A / Rev (%)", "Terminal"]) / 100
+        t_nwc = float(edited.loc["NWC / Rev (%)", "Terminal"]) / 100
+        t_tax = float(edited.loc["Tax Rate (%)", "Terminal"]) / 100
+
+        term_rev = rev * (1 + t_growth)
+        term_ebit = term_rev * t_margin
+        term_nopat = term_ebit * (1 - t_tax)
+        term_fcff = term_nopat + term_rev * t_da - term_rev * t_capex - term_rev * abs(t_nwc)
+
+        if wacc <= t_growth:
+            st.error("WACC must be greater than Terminal Growth!")
+            st.stop()
+
+        tv_val = term_fcff / (wacc - t_growth)
+        pv_tv = tv_val / (1 + wacc) ** n_years
+        total_ev = pv_explicit + pv_tv
+
+        fair_equity = total_ev - model.net_debt - model.minority
+        fair_price = fair_equity / model.shares if model.shares else 0
+        upside = (fair_price / model.price - 1) if model.price else 0
+
+        # ── Verdict ───────────────────────────────────────────────────────────
+        if upside > 0.20:
+            fwd_v, fwd_c = "UNDERVALUED", C_GREEN
+        elif upside > 0.05:
+            fwd_v, fwd_c = "SLIGHT UPSIDE", C_GREEN
+        elif upside > -0.05:
+            fwd_v, fwd_c = "FAIRLY VALUED", C_AMBER
+        elif upside > -0.20:
+            fwd_v, fwd_c = "SLIGHT DOWNSIDE", C_CORAL
+        else:
+            fwd_v, fwd_c = "OVERVALUED", C_RED
+
+        st.markdown(f"""
+        <div style="background-color: {fwd_c}15; border-left: 5px solid {fwd_c}; padding: 20px 24px; border-radius: 4px; margin-bottom: 20px;">
+            <span style="font-size: 28px; font-weight: bold; color: {fwd_c};">🎯 {fwd_v}</span><br>
+            <span style="font-size: 18px; color: #333;">
+                Your fair value: <b>{fair_price:,.1f}</b> vs current price {model.price:,.2f} → <b>{upside:+.1%}</b>
+            </span>
+        </div>""", unsafe_allow_html=True)
+
+        # KPIs
+        f1, f2, f3, f4 = st.columns(4)
+        f1.metric("Current Price", f"{model.price:,.2f}")
+        f2.metric("My Fair Value", f"{fair_price:,.1f}", delta=f"{upside:+.1%}")
+        f3.metric("Enterprise Value", f"{total_ev:,.0f}")
+        tv_fwd_pct = pv_tv / total_ev if total_ev else 0
+        f4.metric("TV %", f"{tv_fwd_pct:.0%}")
+
         st.markdown("---")
-        st.write(f"**Your EBIT Margin:** {my_ebit_margin:.1%} (target in Year {fwd_n})")
-        st.write(f"**Current:** {model.ebit_margin:.1%}")
 
-    # Projection Table
-    st.markdown("---")
-    st.subheader("Projected Cash Flows")
-    proj_df = pd.DataFrame(projection_table)
-    proj_df["Year"] = [f"Y{y}" for y in proj_df["Year"]]
-    proj_df = proj_df.set_index("Year")
+        # My View vs Market
+        st.subheader("My View vs Market Implied")
+        implied_g = r["implied_growth"]
+        avg_my_growth = np.mean([float(edited.loc["Revenue Growth (%)", f"Y{i+1}"]) for i in range(n_years)]) / 100
+        avg_my_margin = float(edited.loc["EBIT Margin (%)", f"Y{n_years}"]) / 100
 
-    # Add terminal row
-    term_row = pd.DataFrame([{
-        "Revenue": rev * (1 + fwd_tg),
-        "EBIT Margin": fwd_tm,
-        "EBIT": rev * (1 + fwd_tg) * fwd_tm,
-        "NOPAT": rev * (1 + fwd_tg) * fwd_tm * (1 - tax),
-        "FCFF": terminal_fcff,
-        "PV(FCFF)": pv_tv,
-    }], index=["Terminal"])
+        cmp_l, cmp_r = st.columns([3, 2])
+        with cmp_l:
+            fig_cmp = go.Figure()
+            fig_cmp.add_trace(go.Bar(x=["Revenue Growth (avg)", "EBIT Margin (Y5)"],
+                y=[avg_my_growth, avg_my_margin], name="My View", marker_color=C_TEAL,
+                text=[f"{avg_my_growth:.1%}", f"{avg_my_margin:.1%}"], textposition="outside"))
+            fig_cmp.add_trace(go.Bar(x=["Revenue Growth (avg)", "EBIT Margin (Y5)"],
+                y=[implied_g, model.ebit_margin], name="Market Implied", marker_color=C_CORAL,
+                text=[f"{implied_g:.1%}", f"{model.ebit_margin:.1%}"], textposition="outside"))
+            fig_cmp.update_layout(height=350, barmode="group", yaxis_tickformat=".0%", plot_bgcolor="white", font=dict(family="Arial"))
+            st.plotly_chart(fig_cmp, use_container_width=True)
+        with cmp_r:
+            diff = avg_my_growth - implied_g
+            st.write(f"**Your avg growth:** {avg_my_growth:.1%} p.a.")
+            st.write(f"**Market implied:** {implied_g:.1%} p.a.")
+            if diff > 0.02:
+                st.write(f"→ You are **more bullish** than the market (+{diff:.1%}pp)")
+            elif diff < -0.02:
+                st.write(f"→ You are **more bearish** ({diff:+.1%}pp)")
+            else:
+                st.write("→ You roughly **agree** with the market")
 
-    display_df = pd.concat([proj_df, term_row])
-    st.dataframe(display_df.style.format({
-        "Revenue": "{:,.0f}", "EBIT": "{:,.0f}", "NOPAT": "{:,.0f}",
-        "FCFF": "{:,.0f}", "PV(FCFF)": "{:,.0f}", "EBIT Margin": "{:.1%}",
-    }), use_container_width=True)
+        # Projected Cash Flows
+        st.markdown("---")
+        st.subheader("Projected Cash Flows")
+        proj_df = pd.DataFrame(projection_rows).set_index("Year")
+        term_row = pd.DataFrame([{"Revenue": term_rev, "Growth": t_growth, "EBIT Margin": t_margin,
+            "EBIT": term_ebit, "NOPAT": term_nopat, "FCFF": term_fcff, "PV(FCFF)": pv_tv}], index=["Terminal"])
+        display_df = pd.concat([proj_df, term_row])
+        st.dataframe(display_df.style.format({
+            "Revenue": "{:,.0f}", "Growth": "{:.1%}", "EBIT Margin": "{:.1%}",
+            "EBIT": "{:,.0f}", "NOPAT": "{:,.0f}", "FCFF": "{:,.0f}", "PV(FCFF)": "{:,.0f}",
+        }), use_container_width=True)
 
-    st.caption(f"WACC: {fwd_wacc:.2%} · Terminal Growth: {fwd_tg:.1%} · Terminal Margin: {fwd_tm:.1%}")
+        # Valuation Bridge
+        st.markdown("---")
+        st.subheader("Valuation Bridge")
+        bridge_l, bridge_r = st.columns([2, 3])
+        with bridge_l:
+            st.write(f"PV Explicit Period: **{pv_explicit:,.0f}**")
+            st.write(f"PV Terminal Value: **{pv_tv:,.0f}**")
+            st.write(f"= Enterprise Value: **{total_ev:,.0f}**")
+            st.write(f"− Net Debt: {model.net_debt:,.0f}")
+            st.write(f"− Minority Interest: {model.minority:,.0f}")
+            st.write(f"= Equity Value: **{fair_equity:,.0f}**")
+            st.write(f"÷ Shares: {model.shares:,.1f}")
+            st.write(f"= **Fair Price: {fair_price:,.1f}** ({upside:+.1%})")
+        with bridge_r:
+            fig_bridge = go.Figure(go.Waterfall(
+                x=["PV Explicit", "PV Terminal", "Enterprise Value", "− Net Debt", "− MI", "Equity Value"],
+                y=[pv_explicit, pv_tv, 0, -model.net_debt, -model.minority, 0],
+                measure=["relative", "relative", "total", "relative", "relative", "total"],
+                connector={"line": {"color": "#ccc"}},
+                increasing={"marker": {"color": C_GREEN}},
+                decreasing={"marker": {"color": C_RED}},
+                totals={"marker": {"color": C_TEAL}},
+                text=[f"{pv_explicit:,.0f}", f"{pv_tv:,.0f}", f"{total_ev:,.0f}",
+                      f"{-model.net_debt:,.0f}", f"{-model.minority:,.0f}", f"{fair_equity:,.0f}"],
+                textposition="outside", textfont=dict(size=11),
+            ))
+            fig_bridge.update_layout(height=350, showlegend=False, plot_bgcolor="white", font=dict(family="Arial"))
+            st.plotly_chart(fig_bridge, use_container_width=True)
 
-    # Bridge: Current Price → Fair Value
-    st.markdown("---")
-    st.subheader("Valuation Bridge")
-    st.write(f"PV Explicit Period: **{pv_explicit:,.0f}**")
-    st.write(f"PV Terminal Value: **{pv_tv:,.0f}**")
-    st.write(f"Enterprise Value: **{total_ev:,.0f}**")
-    st.write(f"– Net Debt: {model.net_debt:,.0f}")
-    st.write(f"– Minority Interest: {model.minority:,.0f}")
-    st.write(f"= Equity Value: **{fair_equity:,.0f}**")
-    st.write(f"÷ Shares: {model.shares:,.1f}")
-    st.write(f"= **Fair Price: {fair_price:,.1f}** ({upside:+.1%} vs {model.price:,.2f})")
+    except Exception as e:
+        st.error(f"Calculation error: {e}. Check your inputs in the table above.")
