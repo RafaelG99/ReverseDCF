@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from core_dcf_engine import CoreDCF, DCFConfig
+from reverse_dcf_engine import CoreDCF, DCFConfig
 import tempfile
 
 st.set_page_config(page_title="CORE DCF", page_icon="📊", layout="wide")
@@ -46,7 +46,7 @@ model._prepare()
 r = model.run()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 Reverse DCF", "📊 Quality & Multiples", "📈 Return Decomposition", "🎯 Forward DCF"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 Reverse DCF", "📊 Quality & Multiples", "📈 Return Decomposition", "👥 Peers", "🎯 Forward DCF"])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1: REVERSE DCF
@@ -272,9 +272,55 @@ with tab3:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4: FORWARD DCF
+# TAB 4: PEERS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab4:
+    st.title(f"Peer Comparison: {r['ticker']}")
+    peers = r.get("peers", [])
+    if peers:
+        pdf = pd.DataFrame(peers)
+        # First row is the main ticker
+        main = pdf[pdf["ticker"].str.contains(model.ticker.split()[0])].head(1) if model.ticker else pd.DataFrame()
+        peer_only = pdf[~pdf["ticker"].str.contains(model.ticker.split()[0])] if model.ticker else pdf
+
+        st.dataframe(pdf[["ticker","name","P/E","EV/EBITDA","P/Sales","Div Yld","ROIC","Gross Mrg","EBIT Mrg"]].style.format(
+            {"P/E":"{:.1f}x","EV/EBITDA":"{:.1f}x","P/Sales":"{:.1f}x","Div Yld":"{:.1f}%","ROIC":"{:.1f}%","Gross Mrg":"{:.1f}%","EBIT Mrg":"{:.1f}%"},na_rep="—"),
+            use_container_width=True)
+
+        # Peer average vs main ticker
+        if len(peer_only) > 0 and len(main) > 0:
+            st.markdown("---")
+            st.subheader("vs Peer Average")
+            for metric in ["P/E","EV/EBITDA","P/Sales","ROIC","Gross Mrg","EBIT Mrg"]:
+                vals = peer_only[metric].dropna()
+                if len(vals) > 0 and main[metric].notna().any():
+                    avg = vals.mean(); own = float(main[metric].iloc[0])
+                    diff = own - avg
+                    fmt = "{:.1f}x" if metric in ["P/E","EV/EBITDA","P/Sales"] else "{:.1f}%"
+                    prem = "premium" if diff > 0 else "discount"
+                    st.write(f"**{metric}**: {fmt.format(own)} vs Peer Avg {fmt.format(avg)} ({prem}: {abs(diff):.1f})")
+
+        # Bar chart
+        if len(peers) > 1:
+            st.markdown("---")
+            st.subheader("Valuation Comparison")
+            for metric, fmt in [("P/E", "x"), ("EV/EBITDA", "x")]:
+                vals = [(p["ticker"], p.get(metric)) for p in peers if p.get(metric) is not None]
+                if vals:
+                    fig_p = go.Figure(go.Bar(
+                        x=[v[0] for v in vals], y=[v[1] for v in vals],
+                        marker_color=[C_TEAL if model.ticker.split()[0] in v[0] else C_CORAL for v in vals],
+                        text=[f"{v[1]:.1f}{fmt}" for v in vals], textposition="outside"))
+                    fig_p.update_layout(height=300, title=metric, showlegend=False, plot_bgcolor="white", font=dict(family="Arial"))
+                    st.plotly_chart(fig_p, use_container_width=True)
+    else:
+        st.info("No peer data found. Add peer tickers in the Peers sheet of your Excel.")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5: FORWARD DCF
+# ══════════════════════════════════════════════════════════════════════════════
+with tab5:
     st.title(f"Forward DCF: {r['ticker']}")
     st.markdown("**Set your assumptions → get your fair value.**")
 
