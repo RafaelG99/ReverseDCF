@@ -38,7 +38,7 @@ class CoreDCF:
     def __init__(self, hist, current, config=None, ticker="", ltm_data=None):
         self.hist = hist.copy(); self.current = current
         self.config = config or DCFConfig(); self.ticker = ticker
-        self.ltm_data = ltm_data or {}; self._warnings = []; self._prepare()
+        self.ltm_data = ltm_data or {}; self._warnings = []; self.peers = []; self._prepare()
 
     @classmethod
     def from_excel(cls, path):
@@ -118,7 +118,38 @@ class CoreDCF:
         if bbg_w and bbg_w > 1: bbg_w /= 100
         if bbg_w and 0.01 < bbg_w < 0.25 and config.wacc == 0.08: config.wacc = bbg_w
 
-        return cls(hist, current, config, ticker, ltm_data)
+        # Peers: read HC block (second table in Peers sheet)
+        peers_data = []
+        if "Peers" in xl.sheet_names:
+            pr = pd.read_excel(xl, "Peers", header=None)
+            # Find second header row (HC block)
+            hdr_count = 0
+            for i in range(len(pr)):
+                if str(pr.iloc[i, 0]).strip() == "Ticker" and str(pr.iloc[i, 1]).strip() == "Name":
+                    hdr_count += 1
+                    if hdr_count == 2:  # second = HC block
+                        hc_hdr = i; break
+            else:
+                # Only one header: use first block directly
+                hc_hdr = 2  # row 2 is header (0-indexed)
+            
+            for j in range(1, 8):  # up to 7 rows after header
+                ri = hc_hdr + 1 + j - 1
+                if ri >= len(pr): break
+                tkr = pr.iloc[ri, 0]
+                if pd.isna(tkr) or "Peer Avg" in str(tkr): continue
+                name = pr.iloc[ri, 1] if pd.notna(pr.iloc[ri, 1]) else ""
+                row_data = {"ticker": str(tkr).replace(" Equity","").strip(), "name": str(name)}
+                cols = ["P/E","EV/EBITDA","P/Sales","FCF","Div Yld","ROIC","Gross Mrg","EBIT Mrg"]
+                for ci, col_name in enumerate(cols):
+                    v = pr.iloc[ri, 2 + ci] if 2 + ci < len(pr.columns) else None
+                    try: row_data[col_name] = float(v) if pd.notna(v) else None
+                    except: row_data[col_name] = None
+                peers_data.append(row_data)
+
+        obj = cls(hist, current, config, ticker, ltm_data)
+        obj.peers = peers_data
+        return obj
 
     def _prepare(self):
         h = self.hist; self._warnings = []
@@ -390,7 +421,7 @@ class CoreDCF:
             "scenarios":sc,"tv_decomposition":tv,"quality":q,"historical_multiples":hm,
             "return_decomposition":rd,"plausibility":pl,"cagr_5y":c5,"cagr_3y":c3,
             "max_growth":mx,"roic_spread":self.current_roic-self.config.wacc,
-            "roic":self.current_roic,"warnings":self._warnings}
+            "roic":self.current_roic,"warnings":self._warnings,"peers":self.peers}
 
     def _last(self,df,col):
         if col not in df: return None
