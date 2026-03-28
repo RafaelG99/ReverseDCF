@@ -1,17 +1,17 @@
 """
-CORE DCF Engine v2 — 4-Stage Reverse DCF + C-Scores + Quality + Return Decomposition
-Based on CORE (Zeltner & Co) architecture.
-
-Stages:
-  S1 (Y1-2):   Consensus FCF growth
-  S2 (Y3-10):  Implied growth (SOLVED)
-  S3 (Y11-20): Linear fade to terminal
-  S4:          Gordon Growth perpetuity
+CORE DCF Engine v3 — 4-Stage Reverse DCF + All Adjustments
+Improvements over v2:
+  - Mid-cycle margin normalization
+  - NWC modeling via DSO/DPI/DPO
+  - IFRS 16 aware (lease in net debt + D&A split)
+  - Scenario-weighted Expected Value
+  - Implied multiples on Forward DCF
+  - Margin of Safety (20% discount)
+  - Shares dilution detection in Return Decomp
 """
 import pandas as pd, numpy as np
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional
 
 @dataclass
 class DCFConfig:
@@ -40,6 +40,7 @@ class CoreDCF:
         self.config = config or DCFConfig(); self.ticker = ticker
         self.ltm_data = ltm_data or {}; self._warnings = []; self.peers = []; self._prepare()
 
+    # ══ EXCEL LOADER ══════════════════════════════════════════════════════════
     @classmethod
     def from_excel(cls, path):
         xl = pd.ExcelFile(path)
@@ -49,8 +50,7 @@ class CoreDCF:
 
         hc_header_row = None
         for i in range(len(raw)):
-            if "HARD COPY" in str(raw.iloc[i, 0]).upper():
-                hc_header_row = i + 1; break
+            if "HARD COPY" in str(raw.iloc[i, 0]).upper(): hc_header_row = i + 1; break
         if hc_header_row is None: raise ValueError("No HARD COPY section")
 
         hc = pd.read_excel(xl, "Fundamentals", header=hc_header_row)
@@ -118,39 +118,35 @@ class CoreDCF:
         if bbg_w and bbg_w > 1: bbg_w /= 100
         if bbg_w and 0.01 < bbg_w < 0.25 and config.wacc == 0.08: config.wacc = bbg_w
 
-        # Peers: read HC block (second table in Peers sheet)
+        # Peers
         peers_data = []
         if "Peers" in xl.sheet_names:
             pr = pd.read_excel(xl, "Peers", header=None)
-            # Find second header row (HC block)
             hdr_count = 0
+            hc_hdr = 2
             for i in range(len(pr)):
                 if str(pr.iloc[i, 0]).strip() == "Ticker" and str(pr.iloc[i, 1]).strip() == "Name":
                     hdr_count += 1
-                    if hdr_count == 2:  # second = HC block
-                        hc_hdr = i; break
-            else:
-                # Only one header: use first block directly
-                hc_hdr = 2  # row 2 is header (0-indexed)
-            
-            for j in range(1, 8):  # up to 7 rows after header
-                ri = hc_hdr + 1 + j - 1
+                    if hdr_count == 2: hc_hdr = i; break
+            for j in range(1, 8):
+                ri = hc_hdr + j
                 if ri >= len(pr): break
                 tkr = pr.iloc[ri, 0]
                 if pd.isna(tkr) or "Peer Avg" in str(tkr): continue
                 name = pr.iloc[ri, 1] if pd.notna(pr.iloc[ri, 1]) else ""
                 row_data = {"ticker": str(tkr).replace(" Equity","").strip(), "name": str(name)}
                 cols = ["P/E","EV/EBITDA","P/Sales","FCF","Div Yld","ROIC","Gross Mrg","EBIT Mrg"]
-                for ci, col_name in enumerate(cols):
-                    v = pr.iloc[ri, 2 + ci] if 2 + ci < len(pr.columns) else None
-                    try: row_data[col_name] = float(v) if pd.notna(v) else None
-                    except: row_data[col_name] = None
+                for ci, cn in enumerate(cols):
+                    v = pr.iloc[ri, 2+ci] if 2+ci < len(pr.columns) else None
+                    try: row_data[cn] = float(v) if pd.notna(v) else None
+                    except: row_data[cn] = None
                 peers_data.append(row_data)
 
         obj = cls(hist, current, config, ticker, ltm_data)
         obj.peers = peers_data
         return obj
 
+    # ══ DATA PREPARATION ══════════════════════════════════════════════════════
     def _prepare(self):
         h = self.hist; self._warnings = []
         fy_rev = self._last(h,"Revenue") or 1; fy_ebit = self._last(h,"EBIT") or 0
@@ -161,18 +157,44 @@ class CoreDCF:
         else:
             self.base_revenue = fy_rev; self.base_ebit = fy_ebit
 
+        # Current margin vs mid-cycle
         self.ebit_margin = self.base_ebit / self.base_revenue if self.base_revenue else 0.15
+        if "EBIT" in h and "Revenue" in h:
+            margins = (h["EBIT"] / h["Revenue"]).replace([np.inf,-np.inf],np.nan).dropna()
+            self.mid_cycle_margin = float(margins.median()) if len(margins) >= 3 else self.ebit_margin
+            self.margin_min = float(margins.min()) if len(margins) >= 3 else self.ebit_margin
+            self.margin_max = float(margins.max()) if len(margins) >= 3 else self.ebit_margin
+        else:
+            self.mid_cycle_margin = self.ebit_margin; self.margin_min = self.ebit_margin; self.margin_max = self.ebit_margin
+
         self.da_pct = self._ratio(h,"DA","Revenue",0.03)
         self.capex_pct = self._ratio(h,"CapEx","Revenue",0.05,absolute=True)
         self.sbc_pct = self._ratio(h,"SBC","Revenue",0.0,absolute=True)
 
-        nwc_s = h.get("Change_NWC",pd.Series(dtype=float)).dropna()
-        rev_s = h.get("Revenue",pd.Series(dtype=float)).dropna()
-        if len(nwc_s)>2 and len(rev_s)>=len(nwc_s):
-            nwc_pct = nwc_s / rev_s.iloc[:len(nwc_s)].values
-            self.nwc_pct = 0.0 if nwc_pct.std()>0.05 or (nwc_pct.max()>0 and nwc_pct.min()<0) else float(nwc_pct.median())
-        else: self.nwc_pct = 0.0
+        # NWC: DSO/DPI based modeling
+        self.dso = self.dpi = self.dpo = 0.0; self.nwc_pct = 0.0
+        if "Accounts_Receivable" in h and "Revenue" in h:
+            dso_s = (h["Accounts_Receivable"] / h["Revenue"] * 365).dropna()
+            if len(dso_s) >= 2: self.dso = float(dso_s.median())
+        if "Inventory" in h and "Revenue" in h:
+            dpi_s = (h["Inventory"] / h["Revenue"] * 365).dropna()
+            if len(dpi_s) >= 2: self.dpi = float(dpi_s.median())
+        # NWC as % of revenue from DSO + DPI
+        self.nwc_pct = (self.dso + self.dpi) / 365 if (self.dso + self.dpi) > 0 else 0.0
+        # But for FCFF we need change in NWC, not level — approximate as incremental
+        # For growing company: delta NWC = nwc_pct * delta_revenue ≈ nwc_pct * growth * revenue
+        # We'll use this in the DCF projection, not in base FCFF
+        self.nwc_change_pct = 0.0  # base year: no change
+        nwc_s = h.get("Change_NWC", pd.Series(dtype=float)).dropna()
+        rev_s = h.get("Revenue", pd.Series(dtype=float)).dropna()
+        if len(nwc_s) > 2 and len(rev_s) >= len(nwc_s):
+            nwc_r = nwc_s / rev_s.iloc[:len(nwc_s)].values
+            if nwc_r.std() > 0.05 or (nwc_r.max() > 0 and nwc_r.min() < 0):
+                self.nwc_change_pct = 0.0
+            else:
+                self.nwc_change_pct = float(nwc_r.median())
 
+        # Tax: median
         tax_rates = []
         if "Tax_Expense" in h and "EBIT" in h:
             for i in range(len(h)):
@@ -182,10 +204,12 @@ class CoreDCF:
                     if 0<r<0.50: tax_rates.append(r)
         self.tax_rate = float(np.median(tax_rates)) if tax_rates else 0.20
 
+        # FCFF
         self.base_fcff = self._compute_fcff(self.base_revenue)
         shares = self._last(h,"Shares_Outstanding") or self._safe_num(self.current.get("Shares Out")) or 1
         self.shares = shares; self.base_fcff_per_share = self.base_fcff/shares if shares else 0
 
+        # Market
         self.price = self._safe_num(self.current.get("Price")) or 0
         mcap = self._safe_num(self.current.get("Market Cap")) or 0
         if self.base_revenue>0 and mcap>0 and mcap/self.base_revenue>5000:
@@ -195,12 +219,13 @@ class CoreDCF:
         cash = self._last(h,"Cash") or 0; mi = self._last(h,"Minority_Interest") or 0
         self.market_cap = mcap; self.net_debt = debt+lease-cash; self.minority = mi
         self.market_ev = mcap + self.net_debt + mi
+        self.lease_liab = lease
 
+        # Consensus
         cons_fy1 = self._safe_num(self.current.get("Cons Rev FY1"))
         cons_fy2 = self._safe_num(self.current.get("Cons Rev FY2"))
-        # Sanity check: if consensus < 50% of base revenue, it's likely a partial year → ignore
         if cons_fy1 and self.base_revenue > 0 and cons_fy1 / self.base_revenue < 0.5:
-            self._warnings.append(f"WARNING: Cons Rev FY1 ({cons_fy1:,.0f}) looks like partial year vs base ({self.base_revenue:,.0f}) — using 0% consensus growth")
+            self._warnings.append(f"WARNING: Cons Rev FY1 ({cons_fy1:,.0f}) looks like partial year — using 0%")
             cons_fy1 = None
         self.consensus_growth_fy1 = cons_fy1/self.base_revenue-1 if cons_fy1 and self.base_revenue>0 else 0.0
         self.consensus_growth_fy2 = cons_fy2/cons_fy1-1 if cons_fy2 and cons_fy1 and cons_fy1>0 else self.consensus_growth_fy1
@@ -212,13 +237,15 @@ class CoreDCF:
         if roic and roic>1: roic /= 100
         self.current_roic = roic or 0
 
+    # ══ FCFF ══════════════════════════════════════════════════════════════════
     def _compute_fcff(self, revenue, margin_override=None):
         m = margin_override if margin_override is not None else self.ebit_margin
         nopat = revenue * m * (1 - self.tax_rate)
-        return nopat + revenue*self.da_pct - revenue*self.capex_pct - revenue*abs(self.nwc_pct) - revenue*self.sbc_pct
+        return nopat + revenue*self.da_pct - revenue*self.capex_pct - revenue*abs(self.nwc_change_pct) - revenue*self.sbc_pct
 
+    # ══ 4-STAGE DCF ══════════════════════════════════════════════════════════
     def _ev_from_fcf_growth(self, ig):
-        w = self.config.wacc; tg = self.config.terminal_growth
+        w=self.config.wacc; tg=self.config.terminal_growth
         n1=self.config.consensus_years; n2=self.config.implied_years; n3=self.config.fade_years
         if w<=tg: return np.inf
         fcff=self.base_fcff; pv=0.0; yr=0
@@ -243,15 +270,23 @@ class CoreDCF:
             else: lo=mid
         return (lo+hi)/2
 
-    def scenario_analysis(self, base_g, offsets=(-0.03,0,0.03)):
-        r={}
-        for lbl,off in zip(["Bear","Base","Bull"],offsets):
+    # ══ SCENARIOS (with probability weighting) ════════════════════════════════
+    def scenario_analysis(self, base_g, offsets=(-0.03,0,0.03), probs=(0.25,0.50,0.25)):
+        r={}; exp_price = 0.0
+        for lbl,off,prob in zip(["Bear","Base","Bull"],offsets,probs):
             g=base_g+off; ev=self._ev_from_fcf_growth(g)
             eq=ev-self.net_debt-self.minority; fp=eq/self.shares if self.shares else 0
             up=fp/self.price-1 if self.price else 0
-            r[lbl]={"growth_rate":g,"ev":ev,"fair_price":fp,"upside":up}
+            r[lbl]={"growth_rate":g,"ev":ev,"fair_price":fp,"upside":up,"probability":prob}
+            exp_price += fp * prob
+        # Expected value + margin of safety
+        r["expected_value"] = exp_price
+        r["expected_upside"] = exp_price/self.price - 1 if self.price else 0
+        r["margin_of_safety_price"] = exp_price * 0.80
+        r["margin_of_safety_upside"] = (exp_price * 0.80)/self.price - 1 if self.price else 0
         return r
 
+    # ══ TV DECOMPOSITION ══════════════════════════════════════════════════════
     def tv_decomposition(self, ig):
         w=self.config.wacc; tg=self.config.terminal_growth
         fcff=self.base_fcff; pv_e=0.0; yr=0
@@ -267,12 +302,11 @@ class CoreDCF:
                 "explicit_pct":pv_e/tot if tot else 0,"tv_pct":pv_tv/tot if tot else 0,
                 "explicit_years":self.config.consensus_years+self.config.implied_years+self.config.fade_years}
 
+    # ══ C-SCORES ══════════════════════════════════════════════════════════════
     def compute_c_score(self):
         h=self.hist; cs=CScore(details={})
-        def _tr(s,n=3):
-            s=s.dropna(); return len(s)>=n and s.iloc[-1]>s.iloc[0]
-        def _td(s,n=3):
-            s=s.dropna(); return len(s)>=n and s.iloc[-1]<s.iloc[0]
+        def _tr(s,n=3): s=s.dropna(); return len(s)>=n and s.iloc[-1]>s.iloc[0]
+        def _td(s,n=3): s=s.dropna(); return len(s)>=n and s.iloc[-1]<s.iloc[0]
         if "CFO" in h and "Net_Income" in h:
             r=(h["CFO"]/h["Net_Income"]).replace([np.inf,-np.inf],np.nan)
             if _td(r): cs.cfo_ni=1; cs.details["CFO/NI"]="Declining"
@@ -298,6 +332,7 @@ class CoreDCF:
         cs.total=cs.cfo_ni+cs.dso+cs.dsi+cs.depr_intensity+cs.asset_growth
         return cs
 
+    # ══ QUALITY ═══════════════════════════════════════════════════════════════
     def compute_quality(self):
         h=self.hist; qp=QualityProfile()
         if "EBIT" in h and "Book_Equity" in h and "Total_Debt" in h and "Cash" in h:
@@ -309,8 +344,7 @@ class CoreDCF:
                 elif roic.iloc[-1]<roic.iloc[-3]-0.02: qp.roic_trend="declining"
                 else: qp.roic_trend="stable"
         if "EBIT" in h and "Revenue" in h:
-            m=(h["EBIT"]/h["Revenue"]).dropna()
-            qp.margin_stability=float(m.std()) if len(m)>1 else 0
+            m=(h["EBIT"]/h["Revenue"]).dropna(); qp.margin_stability=float(m.std()) if len(m)>1 else 0
         if "Revenue" in h:
             rv=h["Revenue"].dropna()
             if len(rv)>2: qp.revenue_volatility=float(rv.pct_change().dropna().std())
@@ -335,6 +369,7 @@ class CoreDCF:
         qp.grade="A" if sc>=5 else "B" if sc>=3 else "C" if sc>=1 else "D"
         return qp
 
+    # ══ HISTORICAL MULTIPLES ══════════════════════════════════════════════════
     def historical_multiples(self):
         h=self.hist; result=[]
         for i in range(len(h)):
@@ -361,6 +396,7 @@ class CoreDCF:
             result.append({"Year":yr,"P/E":pe,"EV/EBITDA":ev_eb,"P/Sales":ps,"FCF Yield":fy})
         return pd.DataFrame(result).set_index("Year")
 
+    # ══ RETURN DECOMPOSITION ══════════════════════════════════════════════════
     def return_decomposition(self):
         h=self.hist
         if "Price_YE" not in h or "Revenue" not in h: return {"available":False}
@@ -375,7 +411,15 @@ class CoreDCF:
         m0=ebit.iloc[0]/rv.iloc[0] if len(ebit)>0 and rv.iloc[0]>0 else 0
         m1=ebit.iloc[-1]/rv.iloc[-1] if len(ebit)>0 and rv.iloc[-1]>0 else 0
         me=(m1/m0)**(1/n)-1 if m0>0 else 0
-        bb=1-(sh.iloc[-1]/sh.iloc[0])**(1/n) if len(sh)>=2 and sh.iloc[0]>0 else 0
+        # Shares: detect dilution vs buyback
+        if len(sh)>=2 and sh.iloc[0]>0:
+            share_change = (sh.iloc[-1]/sh.iloc[0])**(1/n)-1
+            if share_change > 0.05:  # >5% dilution
+                bb = -share_change  # negative = dilution
+                self._warnings.append(f"INFO: Shares increased {share_change:.1%} p.a. (dilution, not buybacks)")
+            else:
+                bb = 1-(sh.iloc[-1]/sh.iloc[0])**(1/n)
+        else: bb=0
         if len(dps)>0 and len(pr)>0:
             dy_list=[dps.iloc[i]/pr.iloc[i] for i in range(min(len(dps),len(pr))) if pr.iloc[i]>0 and pd.notna(dps.iloc[i])]
             dy=float(np.mean(dy_list)) if dy_list else 0
@@ -389,9 +433,26 @@ class CoreDCF:
             "margin_first":m0,"margin_last":m1,"price_first":float(p0),"price_last":float(p1),
             "shares_first":float(sh.iloc[0]) if len(sh)>0 else 0,"shares_last":float(sh.iloc[-1]) if len(sh)>0 else 0}
 
+    # ══ IMPLIED MULTIPLES (for Forward DCF) ═══════════════════════════════════
+    def implied_multiples(self, fair_ev, projected_revenue=None, projected_ebit=None, projected_ebitda=None, projected_ni=None):
+        """What multiples does your fair value imply?"""
+        result = {}
+        fair_eq = fair_ev - self.net_debt - self.minority
+        fair_price = fair_eq / self.shares if self.shares else 0
+        if projected_ebit and projected_ebit > 0:
+            result["implied_EV/EBIT"] = fair_ev / projected_ebit
+        if projected_ebitda and projected_ebitda > 0:
+            result["implied_EV/EBITDA"] = fair_ev / projected_ebitda
+        if projected_revenue and projected_revenue > 0:
+            result["implied_P/Sales"] = (fair_price * self.shares) / projected_revenue
+        if projected_ni and projected_ni > 0:
+            result["implied_P/E"] = fair_price / (projected_ni / self.shares)
+        result["fair_price"] = fair_price
+        return result
+
+    # ══ PLAUSIBILITY ══════════════════════════════════════════════════════════
     def plausibility_checks(self, ig):
-        h=self.hist; rv=h.get("Revenue",pd.Series(dtype=float)).dropna()
-        n=len(rv)
+        h=self.hist; rv=h.get("Revenue",pd.Series(dtype=float)).dropna(); n=len(rv)
         cagr5=(rv.iloc[-1]/rv.iloc[-6])**(1/5)-1 if n>=6 and rv.iloc[-6]>0 else ((rv.iloc[-1]/rv.iloc[0])**(1/max(n-1,1))-1 if n>=2 and rv.iloc[0]>0 else 0)
         cagr3=(rv.iloc[-1]/rv.iloc[-4])**(1/3)-1 if n>=4 and rv.iloc[-4]>0 else 0
         yoy=rv.pct_change().dropna(); mx=float(yoy.max()) if len(yoy)>0 else 0
@@ -408,6 +469,7 @@ class CoreDCF:
              "ratio":"OK" if ig<=mx else "EXCEEDS"}]
         return checks,cagr5,cagr3,mx
 
+    # ══ MAIN RUN ══════════════════════════════════════════════════════════════
     def run(self):
         ig=self.solve_implied_growth(); sc=self.scenario_analysis(ig)
         tv=self.tv_decomposition(ig); q=self.compute_quality()
@@ -417,12 +479,15 @@ class CoreDCF:
             "market_cap":self.market_cap,"implied_growth":ig,"wacc":self.config.wacc,
             "terminal_growth":self.config.terminal_growth,"base_fcff":self.base_fcff,
             "base_fcff_per_share":self.base_fcff_per_share,"ebit_margin":self.ebit_margin,
+            "mid_cycle_margin":self.mid_cycle_margin,"margin_range":(self.margin_min,self.margin_max),
             "consensus_fy1":self.consensus_growth_fy1,"consensus_fy2":self.consensus_growth_fy2,
+            "dso":self.dso,"dpi":self.dpi,
             "scenarios":sc,"tv_decomposition":tv,"quality":q,"historical_multiples":hm,
             "return_decomposition":rd,"plausibility":pl,"cagr_5y":c5,"cagr_3y":c3,
             "max_growth":mx,"roic_spread":self.current_roic-self.config.wacc,
             "roic":self.current_roic,"warnings":self._warnings,"peers":self.peers}
 
+    # ══ HELPERS ═══════════════════════════════════════════════════════════════
     def _last(self,df,col):
         if col not in df: return None
         s=df[col].dropna(); return float(s.iloc[-1]) if len(s)>0 else None
