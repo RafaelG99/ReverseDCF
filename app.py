@@ -104,24 +104,37 @@ with tab1:
     k5.metric("ROIC Spread", f"{roic_sp:+.1%}", delta="Creates Value" if roic_sp>0 else "Destroys", delta_color="normal" if roic_sp>0 else "inverse")
     k6.metric("Quality", r["quality"].grade, delta=f"C-Score {r['quality'].c_score.total}/5")
 
+    # Expected Value + Margin of Safety
+    sc = r["scenarios"]
+    e1,e2,e3 = st.columns(3)
+    e1.metric("Expected Value", f"{sc['expected_value']:,.1f}", delta=f"{sc['expected_upside']:+.1%}")
+    e2.metric("Entry (20% MoS)", f"{sc['margin_of_safety_price']:,.1f}", delta=f"{sc['margin_of_safety_upside']:+.1%}")
+    mid_m = r.get("mid_cycle_margin", model.ebit_margin)
+    m_range = r.get("margin_range", (mid_m, mid_m))
+    e3.metric("Mid-Cycle Margin", f"{mid_m:.1%}", delta=f"Range: {m_range[0]:.1%}–{m_range[1]:.1%}", delta_color="off")
+
     st.markdown("---")
     left,right = st.columns([3,2])
     with left:
         st.subheader("Scenario Fan")
-        sc=r["scenarios"]; labels=["Bear","Base","Bull"]
-        prices=[sc[l]["fair_price"] for l in labels]; ups=[sc[l]["upside"] for l in labels]
+        sc=r["scenarios"]; labels=["Bear (25%)","Base (50%)","Bull (25%)"]
+        prices=[sc[l.split()[0]]["fair_price"] for l in labels]; ups=[sc[l.split()[0]]["upside"] for l in labels]
         fig=go.Figure()
         fig.add_trace(go.Bar(x=labels,y=prices,marker_color=[C_RED,C_AMBER,C_GREEN],
             text=[f"{p:,.1f}<br>({u:+.0%})" for p,u in zip(prices,ups)],textposition="outside",textfont=dict(size=14,color=C_TEAL)))
         fig.add_hline(y=r["price"],line_dash="dash",line_color=C_TEAL,line_width=2,
             annotation_text=f"Current: {r['price']:,.2f}",annotation_position="bottom right")
+        fig.add_hline(y=sc["expected_value"],line_dash="dot",line_color="#8E44AD",line_width=2,
+            annotation_text=f"Expected: {sc['expected_value']:,.1f}",annotation_position="top left")
+        fig.add_hline(y=sc["margin_of_safety_price"],line_dash="dashdot",line_color="#27AE60",line_width=1,
+            annotation_text=f"Entry (MoS): {sc['margin_of_safety_price']:,.1f}",annotation_position="bottom left")
         anr = model._safe_num(model.current.get("Target Price"))
         if anr and anr > 0:
             fig.add_hline(y=anr,line_dash="dot",line_color=C_CORAL,line_width=1,
-                annotation_text=f"ANR Target: {anr:,.0f}",annotation_position="top right")
-        fig.update_layout(height=400,showlegend=False,yaxis_title="Fair Price",plot_bgcolor="white",font=dict(family="Arial"))
+                annotation_text=f"ANR: {anr:,.0f}",annotation_position="top right")
+        fig.update_layout(height=420,showlegend=False,yaxis_title="Fair Price",plot_bgcolor="white",font=dict(family="Arial"))
         st.plotly_chart(fig,use_container_width=True)
-        st.caption(f"4-Stage DCF: Consensus({model.config.consensus_years}Y) → Implied({proj_years}Y) → Fade({model.config.fade_years}Y) → Terminal")
+        st.caption(f"Expected Value = 25%×Bear + 50%×Base + 25%×Bull. Entry = Expected × 80%.")
 
     with right:
         st.subheader("TV Decomposition")
@@ -141,10 +154,11 @@ with tab1:
             st.write(f"{c['flag']} **{c['check']}**: implied {c['implied']} vs hist {c['historical']} ({c['ratio']})")
     with cr:
         st.subheader("Model Inputs")
-        st.write(f"Base Revenue: {model.base_revenue:,.0f} · EBIT Margin: {model.ebit_margin:.1%}")
+        st.write(f"Base Revenue: {model.base_revenue:,.0f} · EBIT Margin: {model.ebit_margin:.1%} (Mid-Cycle: {model.mid_cycle_margin:.1%})")
         st.write(f"FCFF: {model.base_fcff:,.0f} ({model.base_fcff/model.base_revenue:.1%} margin) · FCFF/Share: {model.base_fcff_per_share:,.2f}")
         st.write(f"D&A: {model.da_pct:.1%} · CapEx: {model.capex_pct:.1%} · SBC: {model.sbc_pct:.1%} · Tax: {model.tax_rate:.1%}")
-        st.write(f"MCap: {model.market_cap:,.0f} · Net Debt: {model.net_debt:,.0f} · EV: {model.market_ev:,.0f}")
+        st.write(f"DSO: {model.dso:.0f} days · DPI: {model.dpi:.0f} days · NWC/Rev: {model.nwc_change_pct:.1%}")
+        st.write(f"MCap: {model.market_cap:,.0f} · Net Debt: {model.net_debt:,.0f} (Lease: {model.lease_liab:,.0f}) · EV: {model.market_ev:,.0f}")
         st.write(f"Consensus FY1: {model.consensus_growth_fy1:+.1%} · FY2: {model.consensus_growth_fy2:+.1%}")
 
     # Sensitivity
@@ -415,6 +429,34 @@ with tab5:
                 textposition="outside",textfont=dict(size=10)))
             fig_b.update_layout(height=350,showlegend=False,plot_bgcolor="white",font=dict(family="Arial"))
             st.plotly_chart(fig_b,use_container_width=True)
+
+        # Implied Multiples — what does your fair value imply?
+        st.markdown("---")
+        st.subheader("Implied Multiples & Plausibility")
+        last_row = proj_rows[-1]
+        impl = model.implied_multiples(tot_ev, projected_revenue=last_row["Revenue"],
+            projected_ebit=last_row["EBIT"], projected_ebitda=last_row.get("EBITDA", last_row["EBIT"]*1.3))
+        hm = r["historical_multiples"]
+        im1,im2,im3 = st.columns(3)
+        for col_w, metric, hist_col in [(im1,"implied_EV/EBIT","EV/EBITDA"),(im2,"implied_P/E","P/E"),(im3,"implied_P/Sales","P/Sales")]:
+            val = impl.get(metric)
+            if val:
+                h_med = hm[hist_col].dropna().median() if hist_col in hm else None
+                label = metric.replace("implied_","")
+                col_w.metric(label, f"{val:.1f}x",
+                    delta=f"vs {h_med:.1f}x hist median" if h_med else None,
+                    delta_color="inverse" if h_med and val > h_med * 1.2 else "normal")
+            
+        # Margin of Safety
+        st.markdown("---")
+        mos_price = fp * 0.80
+        mos_up = mos_price / model.price - 1 if model.price else 0
+        st.markdown(f"""<div style="background:#27AE6015;border-left:5px solid #27AE60;padding:15px 20px;border-radius:4px;">
+            <span style="font-size:16px;color:#333;">
+                <b>Entry Target (20% Margin of Safety):</b> {mos_price:,.1f} ({mos_up:+.1%} from current)
+                {'— ✅ Current price is below entry target' if model.price < mos_price else '— ⚠️ Wait for better entry'}
+            </span>
+        </div>""", unsafe_allow_html=True)
 
     except Exception as e:
         st.error(f"Error: {e}")
