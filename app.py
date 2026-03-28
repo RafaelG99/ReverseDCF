@@ -246,8 +246,12 @@ with tab3:
 
         rl,rr = st.columns([3,2])
         with rl:
+            # Detect if buyback is actually dilution
+            is_dilution = rd["buyback_ann"] < -0.05  # shares increased >5% p.a.
+            bb_label = "Dilution" if is_dilution else "Buyback"
+            
             comps = [("Revenue<br>Growth",rd["revenue_growth_ann"]),("Margin<br>Effect",rd["margin_effect_ann"]),
-                ("Buyback",rd["buyback_ann"]),("Dividend",rd["dividend_yield"]),("Multiple<br>Expansion",rd["multiple_expansion_ann"])]
+                (bb_label,rd["buyback_ann"]),("Dividend",rd["dividend_yield"]),("Multiple<br>Expansion",rd["multiple_expansion_ann"])]
             vals=[c[1] for c in comps]
             fig_rd=go.Figure(go.Waterfall(x=[c[0] for c in comps],y=vals,
                 connector={"line":{"color":"#ccc"}},increasing={"marker":{"color":C_GREEN}},
@@ -262,9 +266,13 @@ with tab3:
             st.markdown("**Annualized Components**")
             st.write(f"📈 Revenue Growth: **{rd['revenue_growth_ann']:+.1%}**")
             st.write(f"📊 Margin Effect: **{rd['margin_effect_ann']:+.1%}** ({rd['margin_first']:.1%} → {rd['margin_last']:.1%})")
-            st.write(f"🔄 Buyback Yield: **{rd['buyback_ann']:+.1%}** ({rd['shares_first']:,.0f} → {rd['shares_last']:,.0f})")
+            if is_dilution:
+                st.write(f"🔻 Dilution: **{rd['buyback_ann']:+.1%}** ({rd['shares_first']:,.0f} → {rd['shares_last']:,.0f} shares)")
+                st.caption("⚠️ Shares increased significantly (IPO, capital raises, M&A). Multiple Expansion below is distorted.")
+            else:
+                st.write(f"🔄 Buyback Yield: **{rd['buyback_ann']:+.1%}** ({rd['shares_first']:,.0f} → {rd['shares_last']:,.0f})")
             st.write(f"💰 Dividend Yield: **{rd['dividend_yield']:.1%}**")
-            st.write(f"📐 Multiple Expansion: **{rd['multiple_expansion_ann']:+.1%}**")
+            st.write(f"📐 Multiple Expansion: **{rd['multiple_expansion_ann']:+.1%}**{'  ⚠️ unreliable (dilution distortion)' if is_dilution else ''}")
             st.markdown("---")
             st.write(f"**Total Return: {rd['total_return_ann']:+.1%} p.a.**")
             st.write(f"Price: {rd['price_first']:,.1f} → {rd['price_last']:,.1f}")
@@ -273,13 +281,13 @@ with tab3:
             financial = rd["buyback_ann"] + rd["dividend_yield"]
             multiple = rd["multiple_expansion_ann"]
             total = rd["total_return_ann"]
-            if abs(total) > 0.005:
+            if abs(total) > 0.005 and not is_dilution:
                 st.markdown("---")
                 if multiple > 0.02:
                     st.warning(f"⚠️ {multiple/total*100:.0f}% of return from multiple expansion — not sustainable")
                 elif multiple < -0.02:
                     st.info(f"Multiple contracted {multiple:.1%} p.a. — fundamentals outperformed the stock")
-                if fundamental / total > 0.7 if total > 0 else False:
+                if total > 0 and fundamental / total > 0.7:
                     st.success(f"✅ {fundamental/total*100:.0f}% of return from fundamentals — high quality")
     else:
         st.warning("Return decomposition not available. Need historical Price (YE) data in Fundamentals sheet.")
@@ -341,16 +349,27 @@ with tab5:
     n_fwd = model.config.consensus_years + proj_years
     year_cols = [f"Y{i}" for i in range(1, n_fwd+1)] + ["Terminal"]
 
-    hist_cagr = r["cagr_5y"] if r["cagr_5y"] else 0.05
+    # Default growth = implied growth from Reverse DCF (what the market expects)
+    # This way you START at market expectations and adjust from there
+    implied_g = r["implied_growth"]
+    mid_margin = r.get("mid_cycle_margin", model.ebit_margin)
+    
+    st.caption(f"Defaults: Implied growth ({implied_g:.1%}) from Reverse DCF. Margin fades from current ({model.ebit_margin:.1%}) to mid-cycle ({mid_margin:.1%}). Adjust to reflect YOUR view.")
+
     defaults = {"Metric": ["Revenue Growth (%)", "EBIT Margin (%)", "CapEx/Rev (%)", "D&A/Rev (%)", "SBC/Rev (%)", "Tax Rate (%)"],
                 "Base": ["—", round(model.ebit_margin*100,1), round(model.capex_pct*100,1), round(model.da_pct*100,1), round(model.sbc_pct*100,1), round(model.tax_rate*100,1)]}
 
     rev = model.base_revenue
-    for col in year_cols:
+    for i, col in enumerate(year_cols):
         if col == "Terminal":
-            defaults[col] = [round(tg*100,1), round(model.ebit_margin*100,1), round(model.capex_pct*100,1), round(model.da_pct*100,1), round(model.sbc_pct*100,1), round(model.tax_rate*100,1)]
+            defaults[col] = [round(tg*100,1), round(mid_margin*100,1), round(model.capex_pct*100,1), round(model.da_pct*100,1), round(model.sbc_pct*100,1), round(model.tax_rate*100,1)]
         else:
-            defaults[col] = [round(hist_cagr*100,1), round(model.ebit_margin*100,1), round(model.capex_pct*100,1), round(model.da_pct*100,1), round(model.sbc_pct*100,1), round(model.tax_rate*100,1)]
+            # Growth: start at implied, gradually fade toward terminal
+            fade = i / max(n_fwd - 1, 1)
+            g_default = implied_g * (1 - fade * 0.5) + tg * (fade * 0.5)  # fade halfway toward Tg
+            # Margin: fade from current toward mid-cycle
+            m_default = model.ebit_margin + (mid_margin - model.ebit_margin) * fade * 0.5
+            defaults[col] = [round(g_default*100,1), round(m_default*100,1), round(model.capex_pct*100,1), round(model.da_pct*100,1), round(model.sbc_pct*100,1), round(model.tax_rate*100,1)]
 
     df_def = pd.DataFrame(defaults).set_index("Metric")
     edited = st.data_editor(df_def, use_container_width=True, num_rows="fixed", key=f"fwd_{r['ticker']}")
@@ -434,18 +453,23 @@ with tab5:
         st.markdown("---")
         st.subheader("Implied Multiples & Plausibility")
         last_row = proj_rows[-1]
+        last_ni = last_row["EBIT"] * (1 - float(edited.loc["Tax Rate (%)", f"Y{n_fwd}"]) / 100)
         impl = model.implied_multiples(tot_ev, projected_revenue=last_row["Revenue"],
-            projected_ebit=last_row["EBIT"], projected_ebitda=last_row.get("EBITDA", last_row["EBIT"]*1.3))
+            projected_ebit=last_row["EBIT"], projected_ebitda=last_row.get("EBITDA", last_row["EBIT"]*1.3),
+            projected_ni=last_ni)
         hm = r["historical_multiples"]
         im1,im2,im3 = st.columns(3)
         for col_w, metric, hist_col in [(im1,"implied_EV/EBIT","EV/EBITDA"),(im2,"implied_P/E","P/E"),(im3,"implied_P/Sales","P/Sales")]:
             val = impl.get(metric)
-            if val:
-                h_med = hm[hist_col].dropna().median() if hist_col in hm else None
+            if val and not np.isnan(val):
+                h_med = hm[hist_col].dropna().median() if hist_col in hm and len(hm[hist_col].dropna()) > 0 else None
                 label = metric.replace("implied_","")
-                col_w.metric(label, f"{val:.1f}x",
-                    delta=f"vs {h_med:.1f}x hist median" if h_med else None,
-                    delta_color="inverse" if h_med and val > h_med * 1.2 else "normal")
+                if h_med and not np.isnan(h_med):
+                    col_w.metric(label, f"{val:.1f}x",
+                        delta=f"vs {h_med:.1f}x hist median",
+                        delta_color="inverse" if val > h_med * 1.2 else "normal")
+                else:
+                    col_w.metric(label, f"{val:.1f}x")
             
         # Margin of Safety
         st.markdown("---")
