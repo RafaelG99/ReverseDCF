@@ -34,13 +34,33 @@ Keine Markdown-Codeblöcke. Nur das rohe JSON, beginnend mit { und endend mit }.
 Du bist Senior Equity Analyst bei einem Schweizer Wealth Manager (Valterna AG). \
 Deine Aufgabe: Bottom-up Plausibilisierung von WACC und Terminal Growth für einen Reverse DCF.
 
-Methodisch:
-- WACC: Risk-free Rate (in der Funktionswährung des Unternehmens) + Beta × ERP. ERP für entwickelte Märkte 5.0-6.0%. \
-Beachte Cost of Debt nur wenn Debt/EV signifikant (>10%). Für CHF-Domizile aktuell Rf ~0.5-0.8%, EUR ~2.3-2.6%, USD ~4.0-4.3%.
-- Terminal Growth: Geographisch gewichtetes nominales BIP, ABER für reife Industrieunternehmen begrenzt auf \
-Inflation + 50-100bps Productivity. Realistisch 1.5-2.5%. NIE höher als WACC - 200bps.
+WACC-Methodik:
+- Risk-free Rate (in der Funktionswährung): CHF ~0.5-0.8%, EUR ~2.3-2.6%, USD ~4.0-4.3%, GBP ~3.8-4.2%, JPY ~1.0-1.4%.
+- Equity Risk Premium: 5.0-6.0% für entwickelte Märkte.
+- Cost of Equity = Rf + Beta × ERP
+- Cost of Debt nur wenn Debt/EV > 10%, sonst vernachlässigbar.
 
-Sprache der Rationale-Texte: Deutsch.
+Terminal Growth-Methodik:
+- Untergrenze: Inflation der Hauptmärkte (aktuell CH ~1.0-1.5%, EU ~2.0-2.5%, US ~2.5-3.0%, weltweit ~2.5%).
+- Tg muss MINDESTENS langfristige Inflation des Hauptmarktes sein, sonst impliziert man Real-Schrumpfung.
+- Obergrenze: Nominales BIP des Geo-Mix.
+- Säkulare Tailwinds (siehe unten) rechtfertigen eher Top-End des Range, nicht Underschreitung.
+- NIE höher als WACC - 200bps.
+
+WICHTIG: Säkulare Trends berücksichtigen
+Wenn das Unternehmen klar in Profiteur eines säkularen Trends ist, soll Tg am oberen Ende seiner plausiblen Range liegen, \
+nicht in der Mitte. Beispiele:
+- AI Power / Datacenter Electrification (Profiteure: ABB, Schneider, Vertiv, Eaton, Hubbell): Tg eher 2.2-2.5%
+- Energy Transition / Grid Modernization (Siemens Energy, ABB, GE Vernova, Hitachi Energy): Tg eher 2.0-2.5%
+- Industrial Automation / Robotics (ABB Robotics, Fanuc, KUKA, Yaskawa): Tg eher 2.0-2.3%
+- Demographic / Healthcare Aging (Roche, Novartis, Lonza): Tg eher 2.0-2.5%
+- Defense Spending Cycle (Rheinmetall, Hensoldt, Leonardo): Tg eher 2.0-2.5% trotz Cyclicality
+- Cloud / SaaS (Microsoft, Salesforce): Tg eher 2.5-3.0%
+- Strukturelle Headwinds (Carbon-intensive Sektoren, alte Auto, Tabak): Tg eher 1.0-1.5%
+
+Diese Trends BEEINFLUSSEN NICHT WACC (Risiko-Profil bleibt sektor-typisch), aber sie BEEINFLUSSEN Tg.
+
+Sprache der Rationale: Deutsch. Erkläre IMMER welche säkularen Trends du erkannt hast und wie sie deine Tg-Wahl prägen.
 
 Schema (genau diese Schlüssel verwenden):
 {
@@ -51,7 +71,7 @@ Schema (genau diese Schlüssel verwenden):
   "tg_range_low": 0.015,
   "tg_range_high": 0.025,
   "rationale_wacc": "2-3 Sätze, bottom-up, mit konkreten Zahlen.",
-  "rationale_tg": "2-3 Sätze, geographisch gewichtet."
+  "rationale_tg": "2-3 Sätze, geographisch gewichtet, mit Erkennung der säkularen Trends."
 }
 
 WICHTIG: Werte als Dezimalzahlen (0.067 = 6.7%). Antworte NUR mit dem JSON, sonst nichts."""
@@ -65,31 +85,56 @@ mit sektor- und unternehmensspezifischer Logik.
 
 Methodisch:
 - Y1-Y2: Bloomberg-Konsens (FY1, FY2) — direkt übernehmen, NICHT verändern.
-- Y3-Y5: Säkulare Trends + Mid-Cycle-Konvergenz. Bei Tailwinds (z.B. AI Power, Energy Transition) \
-darf Wachstum über Konsens liegen.
-- Y6-Y10: Fade Richtung Terminal Growth. Margin Mean-Reversion zu Mid-Cycle.
-- Margin-Trajektorie: Wenn aktuelle Margin > Mid-Cycle, fade ZURÜCK Richtung Mid-Cycle (Mean Reversion). \
-Wenn unter Mid-Cycle und ROIC > WACC, fade NACH OBEN Richtung Mid-Cycle.
-- CapEx/D&A/SBC/Tax: relativ stabil halten, nur subtile Trends bei Reasoning.
+- Y3-Y5: Säkulare Trends + strukturelle Bewertung der Mid-Cycle. Bei klaren Tailwinds \
+(AI Power, Energy Transition, Industrial Automation, Defense Cycle, Demographic Healthcare) \
+darf Wachstum DEUTLICH über Konsens und über historischem CAGR liegen.
+- Y6-Y10: Fade Richtung Terminal Growth, aber NICHT zwingend zur Inflation. Wenn säkulare Tailwinds \
+strukturell sind (10+ Jahre), kann Y10 noch 4-5% Wachstum sein, nicht nur 2%.
 
-Sprache: Deutsch.
+WICHTIG zur Margin-Trajektorie:
+Naive Mean Reversion zur historischen Mid-Cycle ist FALSCH wenn:
+- Portfolio des Unternehmens hat sich strukturell geändert (z.B. Power-Grids-Verkauf bei ABB 2018 — \
+Pre-2018-Margins sind nicht mehr relevant für die heutige Capital-Light-Struktur)
+- Säkulare Tailwinds erlauben strukturell höhere Margins (Pricing Power durch Knappheit, \
+z.B. AI Power Equipment, Defense Electronics)
+- Operating Leverage durch Volume-Growth ist real und nachhaltig
+
+In diesen Fällen: Margin-Endpunkt sollte zwischen aktueller Margin und historischer Mid-Cycle liegen, \
+NICHT auf historischer Mid-Cycle. Begründe das in der Rationale.
+
+Wenn das Unternehmen reife/cyclical ist OHNE klare Tailwinds:
+- Klassische Mean Reversion zu historischer Mid-Cycle ist korrekt.
+
+Sektor-Hinweise (nicht erschöpfend, nutze Peers + Engine-Outputs):
+- AI Power / Datacenter (ABB, Schneider, Vertiv, Eaton): Mid-Term Wachstum 6-10%, Margin-Expansion möglich
+- Defense (Rheinmetall, Hensoldt): Mid-Term Wachstum 8-15% solange Cycle läuft, Y6-10 fade auf 4-6%
+- Industrial Automation (ABB Robotics, Fanuc): Mid-Term 5-8%
+- Healthcare Demografie (Roche, Novartis): Mid-Term 4-6% real
+- Cyclical Industrial ohne Tailwind: Mid-Term ~Real GDP, ~3-5%
+
+CapEx/D&A/SBC/Tax: relativ stabil halten, nur subtile Trends bei klar begründbar.
+
+Sprache: Deutsch. Begründe IMMER explizit:
+- Welche säkulare Trends du erkannt hast
+- Ob Margin-Endpunkt = historische Mid-Cycle oder strukturell adjustiert
+- Warum die Y6-Y10 Fade-Trajektorie deine Wahl ist
 
 Schema (10 Jahre Forecast, Y1-Y10, plus Terminal):
 {
   "years": {
     "Y1":  {"growth": 0.119, "margin": 0.182, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
     "Y2":  {"growth": 0.079, "margin": 0.180, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
-    "Y3":  {"growth": 0.070, "margin": 0.175, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
-    "Y4":  {"growth": 0.060, "margin": 0.170, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
-    "Y5":  {"growth": 0.055, "margin": 0.165, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
-    "Y6":  {"growth": 0.045, "margin": 0.160, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
-    "Y7":  {"growth": 0.040, "margin": 0.155, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
-    "Y8":  {"growth": 0.035, "margin": 0.150, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
-    "Y9":  {"growth": 0.030, "margin": 0.145, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
-    "Y10": {"growth": 0.025, "margin": 0.142, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
-    "Terminal": {"growth": 0.020, "margin": 0.140, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258}
+    "Y3":  {"growth": 0.080, "margin": 0.178, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y4":  {"growth": 0.075, "margin": 0.175, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y5":  {"growth": 0.065, "margin": 0.172, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y6":  {"growth": 0.055, "margin": 0.170, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y7":  {"growth": 0.048, "margin": 0.168, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y8":  {"growth": 0.040, "margin": 0.165, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y9":  {"growth": 0.035, "margin": 0.162, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y10": {"growth": 0.030, "margin": 0.160, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Terminal": {"growth": 0.025, "margin": 0.160, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258}
   },
-  "rationale": "3-4 Sätze: warum diese Trajektorie. Sektor-Tailwinds, Margin-Path, Konsens-Anchor."
+  "rationale": "3-4 Sätze: säkulare Trends, Margin-Path-Logik (historisch vs strukturell adjustiert), Konsens-Anchor."
 }
 
 WICHTIG: Alle Werte als Dezimalzahlen (0.05 = 5%), nicht in Prozent. Genau die Schlüssel verwenden: \
@@ -182,8 +227,7 @@ def _extract_json(text: str) -> Optional[dict]:
 
 def _call_claude(api_key: str, system: str, user_message: str,
                  max_tokens: int = 1500) -> Optional[dict]:
-    """Make a Claude API call with prompt caching, return parsed JSON or raise on failure.
-    Uses assistant prefill ('{' as start of response) to force JSON output."""
+    """Make a Claude API call with prompt caching, return parsed JSON or raise on failure."""
     if not api_key:
         return None
     client = Anthropic(api_key=api_key)
@@ -201,13 +245,9 @@ def _call_claude(api_key: str, system: str, user_message: str,
                 }],
                 messages=[
                     {"role": "user", "content": user_message},
-                    # Prefill: force the response to start with `{` so it must be JSON
-                    {"role": "assistant", "content": "{"},
                 ],
             )
             text = "".join(b.text for b in response.content if hasattr(b, "text"))
-            # Re-attach the prefilled `{` since the API response excludes it
-            text = "{" + text
             last_text = text
             parsed = _extract_json(text)
             if parsed is not None:
@@ -220,7 +260,6 @@ def _call_claude(api_key: str, system: str, user_message: str,
             last_error = e
             if attempt < MAX_RETRIES:
                 continue
-    # All retries exhausted — raise so caller sees the actual problem
     if last_error is not None:
         raise RuntimeError(f"Claude API failed after {MAX_RETRIES+1} attempts: "
                            f"{type(last_error).__name__}: {str(last_error)[:300]}")
