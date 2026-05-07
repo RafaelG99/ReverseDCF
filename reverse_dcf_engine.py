@@ -228,7 +228,21 @@ class CoreDCF:
             self.base_fcff = self._compute_fcff(self.base_revenue, margin_override=self.mid_cycle_margin)
         else:
             self.base_fcff = self._compute_fcff(self.base_revenue)
-        shares = self._last(h,"Shares_Outstanding") or self._safe_num(self.current.get("Shares Out")) or 1
+        # Prefer BBG Current Shares Out (more recent — accounts for buybacks/issuances)
+        # over historical last-year shares.
+        shares_bbg = self._safe_num(self.current.get("Shares Out"))
+        shares_hist = self._last(h,"Shares_Outstanding")
+        if shares_bbg and shares_hist:
+            # Use BBG current; warn if differs by >5% (indicates recent corporate action)
+            shares = shares_bbg
+            diff_pct = (shares_bbg - shares_hist) / shares_hist if shares_hist else 0
+            if abs(diff_pct) > 0.05:
+                self._warnings.append(
+                    f"INFO: Using BBG Current Shares Out ({shares_bbg:,.0f}) "
+                    f"vs Historical ({shares_hist:,.0f}) — "
+                    f"{diff_pct:+.1%} change suggests recent rights issue, buyback, or split.")
+        else:
+            shares = shares_bbg or shares_hist or 1
         self.shares = shares; self.base_fcff_per_share = self.base_fcff/shares if shares else 0
 
         # ── Currency detection & normalization ────────────────────────────────
@@ -241,16 +255,29 @@ class CoreDCF:
             mcap /= 1e6; self._warnings.append("INFO: Market Cap normalized (÷1M)")
 
         # Detect pence-quoting: if Sh × Price differs from MCap by ~100x, price is in pence
+        # IMPORTANT: Use BBG current Shares Out (not historical) since post-issuance share counts
+        # may have changed materially. National Grid did 2024 rights issue → 25% more shares.
         self._is_pence_quoted = False
-        if self.price > 0 and shares > 0 and mcap > 0:
-            implied_mcap = self.price * shares
+        shares_bbg = self._safe_num(self.current.get("Shares Out"))
+        shares_for_check = shares_bbg if shares_bbg else shares  # fallback to hist
+        if self.price > 0 and shares_for_check > 0 and mcap > 0:
+            implied_mcap = self.price * shares_for_check
             ratio = implied_mcap / mcap if mcap else 1
-            if 80 < ratio < 120:  # ~100x off → pence quotation
+            if 70 < ratio < 130:  # ~100x off → pence quotation (loosened from 80-120)
                 self.price = self.price / 100
                 self._is_pence_quoted = True
                 self._warnings.append(
                     f"INFO: Price normalized from pence (GBp) to GBP "
                     f"(was {self._safe_num(self.current.get('Price')):.1f}p, now {self.price:.2f})")
+            elif 0.7 < ratio < 1.3:
+                # Already in major currency (GBP/EUR/USD/CHF) — no normalization needed
+                pass
+            else:
+                # Suspicious but no clear pattern — warn
+                self._warnings.append(
+                    f"NOTE: Sh × Price / MCap = {ratio:.2f}x — unusual ratio. "
+                    f"Verify BBG Shares Out ({shares_for_check:,.0f}) and Price ({self.price:.2f}) "
+                    f"are in matching units.")
 
         # Detect Revenue/MCap currency mismatch (e.g. Glencore: USD revenue, GBP MCap)
         # We do NOT auto-FX-convert anymore — instead we warn loudly and offer
@@ -353,6 +380,19 @@ class CoreDCF:
     def solve_implied_growth(self, tol=1e-6, max_iter=200):
         target=self.market_ev
         if target<=0: return 0.0
+        # Sanity check: if base FCFF is negative, the standard Reverse DCF doesn't work.
+        # Common for Utilities/Infrastructure during heavy capex phase (e.g. National Grid).
+        # In this case, mark a warning and return a flag value.
+        if self.base_fcff <= 0:
+            if "FCFF_NEGATIVE" not in str(self._warnings):
+                self._warnings.append(
+                    f"⚠ MODEL LIMITATION: Base FCFF is {self.base_fcff:,.0f} (negative or zero). "
+                    f"Standard Reverse DCF cannot solve for implied growth — typical for Utilities/"
+                    f"Infrastructure in heavy CapEx phase (e.g. Grid Modernisation). "
+                    f"Consider: (1) using EV/EBITDA framework instead, (2) using lower CapEx assumption "
+                    f"reflecting steady-state, or (3) extending forecast period until FCFF turns positive. "
+                    f"Engine output: FCFF_NEGATIVE flag.")
+            return 0.0  # Return 0% as a neutral placeholder
         lo,hi=-0.30,0.80
         for _ in range(max_iter):
             mid=(lo+hi)/2; ev=self._ev_from_fcf_growth(mid)
