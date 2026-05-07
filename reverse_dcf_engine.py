@@ -240,8 +240,31 @@ class CoreDCF:
         debt = self._last(h,"Total_Debt") or 0; lease = self._last(h,"Lease_Liab") or 0
         cash = self._last(h,"Cash") or 0; mi = self._last(h,"Minority_Interest") or 0
         self.market_cap = mcap; self.net_debt = debt+lease-cash; self.minority = mi
-        self.market_ev = mcap + self.net_debt + mi
         self.lease_liab = lease
+
+        # EV: prefer Bloomberg-provided EV (which includes pension, lease, adjustments)
+        # over computed (MCap + NetDebt + Minority). The computed version misses
+        # adjustments like pension liabilities and is therefore a vereinfachte Schätzung.
+        bbg_ev = self._safe_num(self.current.get("EV"))
+        # Same scale-detection as MCap: BBG sometimes reports in absolute units
+        if bbg_ev and self.base_revenue > 0 and bbg_ev / self.base_revenue > 5000:
+            bbg_ev /= 1e6
+        # Sanity: BBG-EV should be at least as big as MCap and within 30% of computed
+        computed_ev = mcap + self.net_debt + mi
+        if bbg_ev and bbg_ev > mcap * 0.9 and abs(bbg_ev/computed_ev - 1) < 0.30:
+            self.market_ev = bbg_ev
+            # Implied "EV adjustments" beyond reported NetDebt+MI (pension, etc.)
+            self._ev_source = "BBG"
+            self._ev_adjustment = bbg_ev - computed_ev
+            if abs(self._ev_adjustment) > mcap * 0.01:  # >1% MCap = significant
+                self._warnings.append(
+                    f"INFO: BBG EV ({bbg_ev:,.0f}) used; differs from computed "
+                    f"({computed_ev:,.0f}) by {self._ev_adjustment:+,.0f} "
+                    f"(likely pension/other adjustments)")
+        else:
+            self.market_ev = computed_ev
+            self._ev_source = "computed"
+            self._ev_adjustment = 0
 
         # Consensus
         cons_fy1 = self._safe_num(self.current.get("Cons Rev FY1"))
