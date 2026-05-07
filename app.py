@@ -179,7 +179,12 @@ with tab1:
             row[f"Tg={t:.1%}"]=m2.solve_implied_growth()
         row["WACC"]=w; rows.append(row)
     sdf=pd.DataFrame(rows).set_index("WACC"); sdf.index=[f"{w:.1%}" for w in w_rng]
-    st.dataframe(sdf.style.format("{:.1%}").background_gradient(cmap="RdYlGn",axis=None),use_container_width=True)
+    try:
+        st.dataframe(sdf.style.format("{:.1%}").background_gradient(cmap="RdYlGn",axis=None),use_container_width=True)
+    except ImportError:
+        # matplotlib not installed — fall back to plain formatted table
+        st.dataframe(sdf.style.format("{:.1%}"),use_container_width=True)
+        st.caption("⚠ Install matplotlib for color-coded heatmap.")
 
     if r["warnings"]:
         with st.expander(f"Data Notes ({len(r['warnings'])})"):
