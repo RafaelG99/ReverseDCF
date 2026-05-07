@@ -400,20 +400,26 @@ class CoreDCF:
 
     def solve_implied_growth(self, tol=1e-6, max_iter=200):
         target=self.market_ev
-        if target<=0: return 0.0
-        # Sanity check: if base FCFF is negative, the standard Reverse DCF doesn't work.
-        # Common for Utilities/Infrastructure during heavy capex phase (e.g. National Grid).
-        # In this case, mark a warning and return a flag value.
+        self._ig_unreliable = False
+        self._ig_unreliable_reason = None
+        if target<=0:
+            self._ig_unreliable = True
+            self._ig_unreliable_reason = "EV ≤ 0"
+            return 0.0
+        # Sanity check: negative base FCFF — standard Reverse DCF can't work.
         if self.base_fcff <= 0:
             if "FCFF_NEGATIVE" not in str(self._warnings):
                 self._warnings.append(
                     f"⚠ MODEL LIMITATION: Base FCFF is {self.base_fcff:,.0f} (negative or zero). "
                     f"Standard Reverse DCF cannot solve for implied growth — typical for Utilities/"
-                    f"Infrastructure in heavy CapEx phase (e.g. Grid Modernisation). "
-                    f"Consider: (1) using EV/EBITDA framework instead, (2) using lower CapEx assumption "
-                    f"reflecting steady-state, or (3) extending forecast period until FCFF turns positive. "
-                    f"Engine output: FCFF_NEGATIVE flag.")
-            return 0.0  # Return 0% as a neutral placeholder
+                    f"Infrastructure in heavy CapEx phase (e.g. Grid Modernisation) or loss-making "
+                    f"transformation cases. Consider: (1) using EV/EBITDA framework instead, "
+                    f"(2) using lower CapEx assumption reflecting steady-state, "
+                    f"(3) setting positive normalized margin via 'Clean Margin' field, "
+                    f"(4) using current EBIT margin instead of Mid-Cycle (uncheck 'Use Mid-Cycle Margin' toggle).")
+            self._ig_unreliable = True
+            self._ig_unreliable_reason = f"Base FCFF = {self.base_fcff:,.0f} (negative)"
+            return 0.0
         lo,hi=-0.30,0.80
         for _ in range(max_iter):
             mid=(lo+hi)/2; ev=self._ev_from_fcf_growth(mid)
@@ -421,23 +427,26 @@ class CoreDCF:
             if ev>target: hi=mid
             else: lo=mid
         result = (lo+hi)/2
-        # Detect bound-pinning: if solver landed at extreme ends, result is unreliable
-        # (e.g. 80% means target EV cannot be reached even at max growth → likely
-        # negative or near-zero FCFF making the perpetuity model break down)
+        # Detect bound-pinning: solver landed at extreme ends → result unreliable
         if result > 0.75:
             self._warnings.append(
                 f"⚠ MODEL LIMITATION: Implied Growth solver hit upper bound (~80%) — "
-                f"this means the market price cannot be justified by even extreme growth assumptions. "
-                f"Likely cause: Base FCFF is too low (current: {self.base_fcff:,.0f}) relative to EV ({self.market_ev:,.0f}). "
-                f"Common for loss-making companies (negative Mid-Cycle margin) or transformation cases. "
-                f"Consider: (1) using EV/EBITDA or EV/Sales instead, (2) extending forecast period, "
-                f"(3) manually setting a positive normalized margin via 'Clean Margin' field.")
+                f"market price cannot be justified by ANY reasonable growth assumption. "
+                f"Likely cause: Base FCFF ({self.base_fcff:,.0f}) is too low relative to EV ({self.market_ev:,.0f}). "
+                f"Implied Growth value of {result:.0%} is NOT meaningful — engine returns this as "
+                f"a 'no-solution' marker. RECOMMENDATIONS: (1) use Forward DCF tab instead, "
+                f"(2) try uncheckung 'Use Mid-Cycle Margin' toggle if Mid-Cycle is negative/very low, "
+                f"(3) override 'Clean Margin' in Excel, (4) use EV/Sales or EV/EBITDA for this stock.")
+            self._ig_unreliable = True
+            self._ig_unreliable_reason = "Solver hit upper bound (80%) — no meaningful solution"
         elif result < -0.25:
             self._warnings.append(
                 f"⚠ MODEL LIMITATION: Implied Growth solver hit lower bound (~-30%) — "
-                f"market price is well below reasonable steady-state value. "
-                f"Possible: (1) market expects severe decline, (2) FCFF is overstated (one-off items), "
-                f"(3) major business model change being priced in.")
+                f"market price implies severe long-term decline. "
+                f"Possible: (1) market expects business contraction, "
+                f"(2) FCFF overstated by one-off items, (3) major business model change being priced in.")
+            self._ig_unreliable = True
+            self._ig_unreliable_reason = "Solver hit lower bound (-30%) — extreme decline implied"
         return result
 
     # ══ SCENARIOS (with probability weighting) ════════════════════════════════
