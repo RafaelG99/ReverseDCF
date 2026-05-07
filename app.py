@@ -108,8 +108,16 @@ with tab1:
     spread = wacc - tg; roic_sp = r["roic_spread"]
     red_flags = sum(1 for c in r["plausibility"] if c["flag"] == "🔴")
 
+    # Check if engine flagged the result as unreliable (negative FCFF, bound-pinning)
+    ig_unreliable = getattr(model, "_ig_unreliable", False)
+    ig_unreliable_reason = getattr(model, "_ig_unreliable_reason", None)
+
     # Verdict
-    if spread < 0.02:
+    if ig_unreliable:
+        verdict, v_color = "⚠ MODEL LIMITATION", C_RED
+        v_action = (f"{ig_unreliable_reason}. Reverse DCF cannot solve meaningfully here. "
+                    f"Use Forward DCF tab or alternative valuation framework.")
+    elif spread < 0.02:
         verdict,v_color = "⚠ RESULT UNRELIABLE", C_RED
         v_action = f"WACC ({wacc:.2%}) too close to Tg ({tg:.2%}). Increase WACC or lower Tg."
     elif ig < -0.10:
@@ -141,15 +149,22 @@ with tab1:
         v_action = "Mixed signals."
 
     st.title(f"{r['ticker']}")
+    if ig_unreliable:
+        ig_line = "Reverse DCF cannot solve meaningfully — use Forward DCF tab."
+    else:
+        ig_line = f"Market implies <b>{ig:.1%} p.a. FCF growth</b> (Y3-{2+proj_years}) to justify {r['price']:,.2f}."
     st.markdown(f"""<div style="background:{v_color}15;border-left:5px solid {v_color};padding:20px 24px;border-radius:4px;margin-bottom:20px;">
         <span style="font-size:28px;font-weight:bold;color:{v_color};">{verdict}</span><br>
-        <span style="font-size:18px;color:#333;">Market implies <b>{ig:.1%} p.a. FCF growth</b> (Y3-{2+proj_years}) to justify {r['price']:,.2f}.</span>
+        <span style="font-size:18px;color:#333;">{ig_line}</span>
         <br><span style="font-size:15px;color:#444;"><b>So what?</b> {v_action}</span>
     </div>""", unsafe_allow_html=True)
 
     k1,k2,k3,k4,k5,k6 = st.columns(6)
     k1.metric("Price", f"{r['price']:,.2f}")
-    k2.metric("Implied Growth", f"{ig:.1%}", delta=f"vs {c5:.1%} 5Y" if c5 else None)
+    if ig_unreliable:
+        k2.metric("Implied Growth", "n/a", delta="UNRELIABLE", delta_color="inverse")
+    else:
+        k2.metric("Implied Growth", f"{ig:.1%}", delta=f"vs {c5:.1%} 5Y" if c5 else None)
     k3.metric("WACC", f"{wacc:.2%}")
     k4.metric("TV %", f"{tv_pct:.0%}")
     k5.metric("ROIC Spread", f"{roic_sp:+.1%}", delta="Creates Value" if roic_sp>0 else "Destroys", delta_color="normal" if roic_sp>0 else "inverse")
@@ -1086,8 +1101,14 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
     tv_pct = r["tv_decomposition"]["tv_pct"]; spread = wacc - tg
     roic_sp = r["roic_spread"]
     red_flags = sum(1 for c in r["plausibility"] if c["flag"] == "🔴")
+    ig_unreliable = getattr(model, "_ig_unreliable", False)
+    ig_unreliable_reason = getattr(model, "_ig_unreliable_reason", None)
 
-    if spread < 0.02:
+    if ig_unreliable:
+        verdict, v_color = "MODEL LIMITATION", C_RED
+        v_action = (f"{ig_unreliable_reason}. Reverse DCF cannot solve meaningfully — "
+                    f"use Forward DCF or alternative framework.")
+    elif spread < 0.02:
         verdict, v_color = "RESULT UNRELIABLE", C_RED
         v_action = f"WACC ({wacc:.2%}) too close to Tg ({tg:.2%})."
     elif ig < -0.10:
@@ -1120,18 +1141,24 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
         v_action = "Mixed signals."
 
     story.append(Paragraph(verdict, verdict_style(v_color)))
-    story.append(Paragraph(
-        f"Market implies <b>{ig:.1%} p.a. FCF growth</b> (Y3-{2+proj_years}) "
-        f"to justify {r['price']:,.2f}.", body))
+    if ig_unreliable:
+        story.append(Paragraph(
+            f"Reverse DCF cannot solve meaningfully — see Forward DCF section for "
+            f"alternative valuation framework.", body))
+    else:
+        story.append(Paragraph(
+            f"Market implies <b>{ig:.1%} p.a. FCF growth</b> (Y3-{2+proj_years}) "
+            f"to justify {r['price']:,.2f}.", body))
     story.append(Paragraph(f"<b>So what?</b> {v_action}", body))
     story.append(Spacer(1, 0.3*cm))
 
     # KPI table (6 metrics)
     sc = r["scenarios"]; q = r["quality"]
+    ig_display = "n/a" if ig_unreliable else f"{ig:.1%}"
     kpi_data = [
         ["Price", "Implied Growth", "WACC", "TV %", "ROIC Spread", "Quality"],
         [f"{r['price']:,.2f}",
-         f"{ig:.1%}",
+         ig_display,
          f"{wacc:.2%}",
          f"{tv_pct:.0%}",
          f"{roic_sp:+.1%}",
