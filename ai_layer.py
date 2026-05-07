@@ -28,7 +28,10 @@ MAX_RETRIES = 2
 
 # ── System prompts (cacheable) ────────────────────────────────────────────────
 
-SYSTEM_WACC_TG = """Du bist Senior Equity Analyst bei einem Schweizer Wealth Manager (Valterna AG). \
+SYSTEM_WACC_TG = """KRITISCH: Antworte AUSSCHLIESSLICH mit einem JSON-Objekt. Keine Erklärung davor oder danach. \
+Keine Markdown-Codeblöcke. Nur das rohe JSON, beginnend mit { und endend mit }.
+
+Du bist Senior Equity Analyst bei einem Schweizer Wealth Manager (Valterna AG). \
 Deine Aufgabe: Bottom-up Plausibilisierung von WACC und Terminal Growth für einen Reverse DCF.
 
 Methodisch:
@@ -37,9 +40,9 @@ Beachte Cost of Debt nur wenn Debt/EV signifikant (>10%). Für CHF-Domizile aktu
 - Terminal Growth: Geographisch gewichtetes nominales BIP, ABER für reife Industrieunternehmen begrenzt auf \
 Inflation + 50-100bps Productivity. Realistisch 1.5-2.5%. NIE höher als WACC - 200bps.
 
-Output STRIKT als JSON, keine Markdown-Codeblöcke, keine Erklärungen ausserhalb des JSON. Sprache: Deutsch.
+Sprache der Rationale-Texte: Deutsch.
 
-Schema:
+Schema (genau diese Schlüssel verwenden):
 {
   "wacc_recommended": 0.067,
   "wacc_range_low": 0.060,
@@ -49,10 +52,15 @@ Schema:
   "tg_range_high": 0.025,
   "rationale_wacc": "2-3 Sätze, bottom-up, mit konkreten Zahlen.",
   "rationale_tg": "2-3 Sätze, geographisch gewichtet."
-}"""
+}
+
+WICHTIG: Werte als Dezimalzahlen (0.067 = 6.7%). Antworte NUR mit dem JSON, sonst nichts."""
 
 
-SYSTEM_FWD_PREFILL = """Du bist Senior Equity Analyst bei Valterna AG. Du baust eine Forward DCF Projektion \
+SYSTEM_FWD_PREFILL = """KRITISCH: Antworte AUSSCHLIESSLICH mit einem JSON-Objekt. Keine Erklärung davor oder danach. \
+Keine Markdown-Codeblöcke. Nur das rohe JSON, beginnend mit { und endend mit }.
+
+Du bist Senior Equity Analyst bei Valterna AG. Du baust eine Forward DCF Projektion \
 mit sektor- und unternehmensspezifischer Logik.
 
 Methodisch:
@@ -64,25 +72,34 @@ darf Wachstum über Konsens liegen.
 Wenn unter Mid-Cycle und ROIC > WACC, fade NACH OBEN Richtung Mid-Cycle.
 - CapEx/D&A/SBC/Tax: relativ stabil halten, nur subtile Trends bei Reasoning.
 
-Output STRIKT als JSON, keine Markdown-Codeblöcke. Sprache: Deutsch.
+Sprache: Deutsch.
 
 Schema (10 Jahre Forecast, Y1-Y10, plus Terminal):
 {
   "years": {
     "Y1":  {"growth": 0.119, "margin": 0.182, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
-    "Y2":  {...},
-    ...
-    "Y10": {...},
+    "Y2":  {"growth": 0.079, "margin": 0.180, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y3":  {"growth": 0.070, "margin": 0.175, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y4":  {"growth": 0.060, "margin": 0.170, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y5":  {"growth": 0.055, "margin": 0.165, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y6":  {"growth": 0.045, "margin": 0.160, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y7":  {"growth": 0.040, "margin": 0.155, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y8":  {"growth": 0.035, "margin": 0.150, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y9":  {"growth": 0.030, "margin": 0.145, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
+    "Y10": {"growth": 0.025, "margin": 0.142, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258},
     "Terminal": {"growth": 0.020, "margin": 0.140, "capex": 0.027, "da": 0.033, "sbc": 0.002, "tax": 0.258}
   },
   "rationale": "3-4 Sätze: warum diese Trajektorie. Sektor-Tailwinds, Margin-Path, Konsens-Anchor."
 }
 
 WICHTIG: Alle Werte als Dezimalzahlen (0.05 = 5%), nicht in Prozent. Genau die Schlüssel verwenden: \
-growth, margin, capex, da, sbc, tax."""
+growth, margin, capex, da, sbc, tax. Antworte NUR mit dem JSON, sonst nichts."""
 
 
-SYSTEM_COMMENTARY = """Du bist Senior Equity Analyst bei Valterna AG. Du schreibst eine 1-Seiten Executive Summary \
+SYSTEM_COMMENTARY = """KRITISCH: Antworte AUSSCHLIESSLICH mit einem JSON-Objekt. Keine Erklärung davor oder danach. \
+Keine Markdown-Codeblöcke. Nur das rohe JSON, beginnend mit { und endend mit }.
+
+Du bist Senior Equity Analyst bei Valterna AG. Du schreibst eine 1-Seiten Executive Summary \
 für das Investment Committee. Adressat: CIO, CFO, Senior PMs. Stil: präzise, direkt, ohne Buzzwords. \
 Keine "auf der einen Seite, andererseits"-Sprache. Klare Verdicts mit konkreten Zahlen. \
 Schweizer Hochdeutsch (kein "Du", förmlich aber nicht steif).
@@ -93,52 +110,80 @@ Methodisch:
 - Verdict: Long / Hold / Trim / Avoid mit Entry-Level. Begründung warum.
 - Catalysts & Risks: 3-5 konkrete Datapoints zum Monitoring.
 
-Output STRIKT als JSON, keine Markdown-Codeblöcke.
-
 Schema:
 {
-  "headline": "Ein-Satz-Einordnung, plakativ. Z.B. 'Strukturell hochwertiges Industrial Compounder, aber Bewertung priced perfection ein.'",
+  "headline": "Ein-Satz-Einordnung, plakativ.",
   "thesis": "1-2 Sätze zentrale Frage des Investments.",
   "bull_case": "2-3 Sätze, konkrete Trigger.",
   "base_case": "2-3 Sätze, was die Engine sagt + Konsens-View.",
   "bear_case": "2-3 Sätze, konkrete Risiken.",
-  "verdict_action": "LONG | ACCUMULATE | HOLD | TRIM | AVOID",
+  "verdict_action": "LONG",
   "verdict_entry_level": 70.0,
   "verdict_rationale": "2-3 Sätze: warum diese Action und warum dieser Entry Level.",
-  "catalysts": ["Konkreter Datapoint 1", "Konkreter Datapoint 2", "..."],
-  "risks": ["Risiko 1", "Risiko 2", "..."]
-}"""
+  "catalysts": ["Konkreter Datapoint 1", "Konkreter Datapoint 2"],
+  "risks": ["Risiko 1", "Risiko 2"]
+}
+
+verdict_action muss eines sein von: LONG, ACCUMULATE, HOLD, TRIM, AVOID.
+Antworte NUR mit dem JSON, sonst nichts."""
 
 
 # ── Helper: extract JSON robustly ─────────────────────────────────────────────
 
 def _extract_json(text: str) -> Optional[dict]:
-    """Extract JSON from response, even if wrapped in markdown or has prose around it."""
+    """Extract JSON from response. Handles: pure JSON, markdown-wrapped, prose+JSON.
+    Uses brace counting (not regex) to handle nested objects correctly."""
+    if not text:
+        return None
+    text = text.strip()
     # Try direct parse first
     try:
-        return json.loads(text.strip())
+        return json.loads(text)
     except json.JSONDecodeError:
         pass
-    # Try to find a JSON block
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    # Try markdown code block
+    match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(1))
+            return json.loads(match.group(1).strip())
         except json.JSONDecodeError:
             pass
-    # Try to find first {...} that's valid
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
+    # Brace counting: find first { and match its closing }
+    start = text.find("{")
+    if start >= 0:
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"' and not escape:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i+1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break
     return None
 
 
 def _call_claude(api_key: str, system: str, user_message: str,
                  max_tokens: int = 1500) -> Optional[dict]:
-    """Make a Claude API call with prompt caching, return parsed JSON or raise on failure."""
+    """Make a Claude API call with prompt caching, return parsed JSON or raise on failure.
+    Uses assistant prefill ('{' as start of response) to force JSON output."""
     if not api_key:
         return None
     client = Anthropic(api_key=api_key)
@@ -154,9 +199,15 @@ def _call_claude(api_key: str, system: str, user_message: str,
                     "text": system,
                     "cache_control": {"type": "ephemeral"},
                 }],
-                messages=[{"role": "user", "content": user_message}],
+                messages=[
+                    {"role": "user", "content": user_message},
+                    # Prefill: force the response to start with `{` so it must be JSON
+                    {"role": "assistant", "content": "{"},
+                ],
             )
             text = "".join(b.text for b in response.content if hasattr(b, "text"))
+            # Re-attach the prefilled `{` since the API response excludes it
+            text = "{" + text
             last_text = text
             parsed = _extract_json(text)
             if parsed is not None:
@@ -174,7 +225,7 @@ def _call_claude(api_key: str, system: str, user_message: str,
         raise RuntimeError(f"Claude API failed after {MAX_RETRIES+1} attempts: "
                            f"{type(last_error).__name__}: {str(last_error)[:300]}")
     if last_text is not None:
-        raise RuntimeError(f"Claude returned non-JSON response: {last_text[:300]}")
+        raise RuntimeError(f"Claude returned non-JSON response: {last_text[:500]}")
     return None
 
 
