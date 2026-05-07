@@ -48,6 +48,17 @@ api_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else
 ai_available = bool(api_key)
 if not ai_available:
     st.sidebar.caption("⚠ No API key. Add ANTHROPIC_API_KEY in secrets.toml.")
+else:
+    st.sidebar.caption(f"✓ API Key loaded ({api_key[:12]}...{api_key[-4:]})")
+
+# Try to import anthropic package — show error if missing
+try:
+    import anthropic as _anthropic_check
+    _anthropic_version = _anthropic_check.__version__
+    st.sidebar.caption(f"✓ anthropic SDK v{_anthropic_version}")
+except ImportError as _e:
+    st.sidebar.error(f"❌ anthropic package not installed: {_e}")
+    ai_available = False
 
 ai_smart_wacc = st.sidebar.checkbox("Smart WACC/Tg Defaults", value=ai_available, disabled=not ai_available,
     help="Bottom-up plausibilization of WACC and Terminal Growth.")
@@ -63,8 +74,16 @@ if ai_smart_wacc and ai_available:
     if cache_key not in st.session_state:
         with st.sidebar:
             with st.spinner("AI: WACC/Tg analysis..."):
-                from ai_layer import smart_wacc_tg
-                st.session_state[cache_key] = smart_wacc_tg(api_key, model)
+                try:
+                    from ai_layer import smart_wacc_tg
+                    result = smart_wacc_tg(api_key, model)
+                    if result is None:
+                        st.sidebar.warning("⚠ AI returned no result (parse failure or API error). "
+                                           "Check Manage app → Logs.")
+                    st.session_state[cache_key] = result
+                except Exception as _e:
+                    st.sidebar.error(f"❌ AI call failed: {type(_e).__name__}: {str(_e)[:200]}")
+                    st.session_state[cache_key] = None
     ai_wacc_tg = st.session_state.get(cache_key)
     if ai_wacc_tg:
         st.sidebar.caption(f"💡 AI suggests WACC {ai_wacc_tg.get('wacc_recommended', 0):.2%}, "
