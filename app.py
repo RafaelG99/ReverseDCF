@@ -696,9 +696,10 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.units import cm, mm
     from reportlab.lib import colors
-    from reportlab.lib.enums import TA_LEFT, TA_CENTER
-    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
-        TableStyle, Image as RLImage, PageBreak, KeepTogether)
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+    from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame,
+        Paragraph, Spacer, Table, TableStyle, Image as RLImage,
+        PageBreak, KeepTogether)
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
     import os
@@ -751,19 +752,79 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
         pass  # silent fallback to Helvetica
 
     buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4,
-        leftMargin=1.6*cm, rightMargin=1.6*cm,
-        topMargin=1.4*cm, bottomMargin=1.4*cm,
+
+    # ── Logo path resolution (same dir as app.py, optional) ───────────────────
+    logo_path = None
+    for p in ["valterna_logo.png", "logo.png", "assets/valterna_logo.png"]:
+        if os.path.exists(p):
+            logo_path = p
+            break
+
+    # ── Page header/footer drawing functions ──────────────────────────────────
+    page_w, page_h = A4
+    margin_l = 1.6 * cm
+    margin_r = 1.6 * cm
+
+    def _on_page(canvas, doc):
+        """Draw header + footer on every page. Mini style works for all pages."""
+        canvas.saveState()
+        # Logo (top-left)
+        if logo_path:
+            try:
+                logo_w = 3.2 * cm
+                logo_h = logo_w * (52.6 / 263.2)
+                canvas.drawImage(logo_path, margin_l, page_h - 1.0*cm - logo_h,
+                    width=logo_w, height=logo_h, preserveAspectRatio=True, mask='auto')
+            except Exception:
+                pass
+        # Right side: ticker + date
+        canvas.setFont(FONT_BOLD, 8)
+        canvas.setFillColor(colors.HexColor(C_NAVY))
+        canvas.drawRightString(page_w - margin_r, page_h - 1.1*cm, r['ticker'])
+        canvas.setFont(FONT_REG, 7.5)
+        canvas.setFillColor(colors.HexColor(C_GRAY_MID))
+        canvas.drawRightString(page_w - margin_r, page_h - 1.4*cm,
+            f"{datetime.now():%d %B %Y}")
+        # Gold separator line
+        canvas.setStrokeColor(colors.HexColor(C_GOLD))
+        canvas.setLineWidth(0.8)
+        canvas.line(margin_l, page_h - 1.85*cm, page_w - margin_r, page_h - 1.85*cm)
+        # Footer line
+        canvas.setStrokeColor(colors.HexColor(C_BORDER))
+        canvas.setLineWidth(0.4)
+        canvas.line(margin_l, 1.0*cm, page_w - margin_r, 1.0*cm)
+        # Footer text
+        canvas.setFont(FONT_REG, 7)
+        canvas.setFillColor(colors.HexColor(C_GRAY_MID))
+        canvas.drawString(margin_l, 0.65*cm, "Valterna AG · CORE DCF Engine · Confidential")
+        canvas.drawRightString(page_w - margin_r, 0.65*cm, f"Page {doc.page}")
+        canvas.restoreState()
+
+    # Frame: leave space for header (top 2.2cm) and footer (bottom 1.3cm)
+    frame = Frame(margin_l, 1.3*cm,
+        page_w - margin_l - margin_r, page_h - 2.2*cm - 1.3*cm,
+        id='content', leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+
+    main_template = PageTemplate(id='main', frames=[frame], onPage=_on_page)
+
+    doc = BaseDocTemplate(buf, pagesize=A4,
+        leftMargin=margin_l, rightMargin=margin_r,
+        topMargin=2.2*cm, bottomMargin=1.3*cm,
         title=f"CORE DCF Report – {r['ticker']}",
-        author="Valterna AG")
+        author="Valterna AG",
+        pageTemplates=[main_template])
 
     styles = getSampleStyleSheet()
     h1 = ParagraphStyle("H1", parent=styles["Heading1"], fontName=FONT_BOLD,
         fontSize=18, textColor=colors.HexColor(C_NAVY), spaceAfter=8, spaceBefore=4, leading=22)
     h2 = ParagraphStyle("H2", parent=styles["Heading2"], fontName=FONT_BOLD,
-        fontSize=13, textColor=colors.HexColor(C_NAVY), spaceAfter=6, spaceBefore=10, leading=16)
+        fontSize=12, textColor=colors.HexColor(C_NAVY), spaceAfter=8, spaceBefore=12, leading=15,
+        borderPadding=(0, 0, 4, 0),  # bottom padding before underline
+        borderColor=colors.HexColor(C_GOLD),
+        borderWidth=0)  # we'll draw underline differently via small Table
     h3 = ParagraphStyle("H3", parent=styles["Heading3"], fontName=FONT_BOLD,
-        fontSize=11, textColor=colors.HexColor(C_NAVY), spaceAfter=4, spaceBefore=6, leading=14)
+        fontSize=10.5, textColor=colors.HexColor(C_NAVY), spaceAfter=4, spaceBefore=8, leading=13,
+        textTransform="uppercase")
     body = ParagraphStyle("body", parent=styles["BodyText"], fontName=FONT_REG,
         fontSize=9.5, leading=13, spaceAfter=3, textColor=colors.HexColor(C_GRAY_DARK))
     small = ParagraphStyle("small", parent=styles["BodyText"], fontName=FONT_REG,
@@ -773,32 +834,54 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
         fontSize=14, textColor=colors.HexColor(c), spaceAfter=4, spaceBefore=2,
         alignment=TA_LEFT, leading=17)
 
+    def _section_header(text):
+        """Section header with subtle gold underline — replaces h2 calls for visual consistency."""
+        para = Paragraph(text, h2)
+        underline = Table([[" "]], colWidths=[18.0*cm], rowHeights=[0.5])
+        underline.setStyle(TableStyle([
+            ("LINEABOVE", (0, 0), (-1, 0), 1.0, colors.HexColor(C_GOLD)),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        return [para, underline, Spacer(1, 0.2*cm)]
+
+    def _data_table_style(header_rows=1, alt_rows=True, highlight_last=False):
+        """Standard data table style: light header, alternating rows, soft grid."""
+        style = [
+            # Header row(s)
+            ("BACKGROUND", (0, 0), (-1, header_rows-1), colors.HexColor(C_NAVY)),
+            ("TEXTCOLOR", (0, 0), (-1, header_rows-1), colors.white),
+            ("FONTNAME", (0, 0), (-1, header_rows-1), FONT_BOLD),
+            ("FONTSIZE", (0, 0), (-1, header_rows-1), 8.5),
+            ("ALIGN", (0, 0), (-1, header_rows-1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("BOTTOMPADDING", (0, 0), (-1, header_rows-1), 6),
+            ("TOPPADDING", (0, 0), (-1, header_rows-1), 6),
+            # Body rows
+            ("FONTNAME", (0, header_rows), (-1, -1), FONT_REG),
+            ("FONTSIZE", (0, header_rows), (-1, -1), 8.5),
+            ("TEXTCOLOR", (0, header_rows), (-1, -1), colors.HexColor(C_GRAY_DARK)),
+            ("ALIGN", (0, header_rows), (-1, -1), "CENTER"),
+            ("BOTTOMPADDING", (0, header_rows), (-1, -1), 5),
+            ("TOPPADDING", (0, header_rows), (-1, -1), 5),
+            # Soft grid
+            ("LINEBELOW", (0, header_rows-1), (-1, header_rows-1), 1.2, colors.HexColor(C_GOLD)),
+            ("LINEBELOW", (0, header_rows), (-1, -2), 0.25, colors.HexColor(C_BORDER)),
+        ]
+        if highlight_last:
+            style += [
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor(C_BG_TEAL)),
+                ("FONTNAME", (0, -1), (-1, -1), FONT_BOLD),
+                ("TEXTCOLOR", (0, -1), (-1, -1), colors.HexColor(C_NAVY)),
+                ("LINEABOVE", (0, -1), (-1, -1), 0.8, colors.HexColor(C_GOLD)),
+            ]
+        return TableStyle(style)
+
     story = []
 
     # ══ PAGE 0: VALTERNA EXECUTIVE SUMMARY (only if AI summary provided) ═════
     if ai_summary:
-        # Valterna brand strip at top
-        from datetime import datetime as _dt
-        brand_strip = Table(
-            [[Paragraph(f"<font color='{C_NAVY}'><b>VALTERNA AG</b></font>  "
-                       f"<font color='{C_GOLD}'>·  Investment Committee Memo</font>",
-                       ParagraphStyle("brand", fontName=FONT_BOLD, fontSize=10,
-                                      textColor=colors.HexColor(C_NAVY))),
-              Paragraph(f"<font color='{C_GRAY_MID}'>{_dt.now():%d %B %Y}</font>",
-                       ParagraphStyle("date", fontName=FONT_REG, fontSize=9,
-                                      textColor=colors.HexColor(C_GRAY_MID),
-                                      alignment=2))]],  # right-aligned
-            colWidths=[12.0*cm, 6.0*cm])
-        brand_strip.setStyle(TableStyle([
-            ("LINEBELOW", (0, 0), (-1, 0), 1.2, colors.HexColor(C_GOLD)),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ("TOPPADDING", (0, 0), (-1, -1), 0),
-            ("LEFTPADDING", (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ]))
-        story.append(brand_strip)
-        story.append(Spacer(1, 0.5*cm))
-
+        # Brand strip is now drawn by cover_template; just add title block
         # Ticker title block
         title_para = ParagraphStyle("title_p", fontName=FONT_BOLD,
             fontSize=22, textColor=colors.HexColor(C_NAVY), leading=26, spaceAfter=2)
@@ -966,12 +1049,18 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
         story.append(PageBreak())
 
     # ══ PAGE 1: COVER + REVERSE DCF VERDICT ══════════════════════════════════
-    story.append(Paragraph(f"CORE DCF Report: {r['ticker']}", h1))
-    story.append(Paragraph(f"Generated {datetime.now():%d %b %Y, %H:%M} · "
-        f"WACC {wacc:.2%} · Tg {tg:.2%} · Implied Period {proj_years}Y · "
+    # Compact ticker title block (header bar already shows logo + date + ticker)
+    cover_title = ParagraphStyle("cov_t", fontName=FONT_BOLD,
+        fontSize=20, textColor=colors.HexColor(C_NAVY), leading=24, spaceAfter=2)
+    cover_sub = ParagraphStyle("cov_s", fontName=FONT_REG,
+        fontSize=9, textColor=colors.HexColor(C_GRAY_MID), leading=12, spaceAfter=10)
+    story.append(Paragraph(f"Reverse DCF Analysis  <font color='{C_GOLD}'>·</font>  "
+                          f"<font color='{C_NAVY}' size='14'>{r['price']:.2f}</font>",
+                          cover_title))
+    story.append(Paragraph(
+        f"WACC {wacc:.2%}  ·  Tg {tg:.2%}  ·  Implied Period {proj_years}Y  ·  "
         f"Base FCFF: {'Mid-Cycle' if model.config.use_midcycle_margin else 'Current'} margin",
-        small))
-    story.append(Spacer(1, 0.3*cm))
+        cover_sub))
 
     # Verdict box (replicate Tab 1 logic)
     ig = r["implied_growth"]; c5 = r["cagr_5y"]; c3 = r["cagr_3y"]
@@ -1031,17 +1120,23 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
     ]
     kpi_tbl = Table(kpi_data, colWidths=[2.9*cm]*6)
     kpi_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(C_TEAL)),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        # Header row: light tinted background, navy text, gold underline
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(C_BG_TEAL)),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(C_NAVY)),
+        ("FONTNAME", (0, 0), (-1, 0), FONT_BOLD),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("LINEBELOW", (0, 0), (-1, 0), 1.2, colors.HexColor(C_GOLD)),
+        # Data row
+        ("FONTNAME", (0, 1), (-1, 1), FONT_BOLD),
+        ("FONTSIZE", (0, 1), (-1, 1), 11),
+        ("TEXTCOLOR", (0, 1), (-1, 1), colors.HexColor(C_NAVY)),
+        # Common
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 5),
+        ("TOPPADDING", (0, 0), (-1, 0), 6),
+        ("BOTTOMPADDING", (0, 1), (-1, 1), 8),
+        ("TOPPADDING", (0, 1), (-1, 1), 6),
     ]))
     story.append(kpi_tbl)
     story.append(Spacer(1, 0.3*cm))
@@ -1057,21 +1152,25 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
     ]
     ev_tbl = Table(ev_data, colWidths=[5.8*cm]*3)
     ev_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f4f6")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(C_TEAL)),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(C_BG_LIGHT)),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(C_GRAY_DARK)),
+        ("FONTNAME", (0, 0), (-1, 0), FONT_BOLD),
+        ("FONTSIZE", (0, 0), (-1, 0), 8),
+        ("FONTNAME", (0, 1), (-1, 1), FONT_BOLD),
+        ("FONTSIZE", (0, 1), (-1, 1), 10),
+        ("TEXTCOLOR", (0, 1), (-1, 1), colors.HexColor(C_NAVY)),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 5),
+        ("TOPPADDING", (0, 0), (-1, 0), 6),
+        ("BOTTOMPADDING", (0, 1), (-1, 1), 7),
+        ("TOPPADDING", (0, 1), (-1, 1), 5),
     ]))
     story.append(ev_tbl)
     story.append(Spacer(1, 0.4*cm))
 
     # Scenario Fan + TV Pie side by side
-    story.append(Paragraph("Scenario Fan & TV Decomposition", h2))
+    story.extend(_section_header("Scenario Fan & TV Decomposition"))
     fan_png = _fig_to_png(_build_scenario_fan(r, model, C_TEAL, C_CORAL, C_AMBER, C_GREEN, C_RED), w=700, h=400)
     pie_png = _fig_to_png(_build_tv_pie(r, C_TEAL, C_CORAL), w=500, h=400)
     fan_img = RLImage(BytesIO(fan_png), width=10.6*cm, height=6.0*cm)
@@ -1087,7 +1186,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
     story.append(PageBreak())
 
     # ══ PAGE 2: PLAUSIBILITY + INPUTS + SENSITIVITY ══════════════════════════
-    story.append(Paragraph("Plausibility Checks", h2))
+    story.extend(_section_header("Plausibility Checks"))
     plaus_data = [["Flag", "Check", "Implied", "Historical", "Ratio"]]
     flag_map = {"🟢": "OK", "🟡": "WARN", "🔴": "FAIL"}
     for c in r["plausibility"]:
@@ -1118,7 +1217,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
     story.append(Spacer(1, 0.4*cm))
 
     # Model Inputs
-    story.append(Paragraph("Model Inputs", h2))
+    story.extend(_section_header("Model Inputs"))
     inputs_lines = [
         f"<b>Base Revenue:</b> {model.base_revenue:,.0f} · "
         f"<b>EBIT Margin:</b> {model.ebit_margin:.1%} (Mid-Cycle: {model.mid_cycle_margin:.1%})",
@@ -1138,7 +1237,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
     story.append(Spacer(1, 0.4*cm))
 
     # Sensitivity table (recompute as in app)
-    story.append(Paragraph("Sensitivity: Implied Growth (WACC × Tg)", h2))
+    story.extend(_section_header("Sensitivity: Implied Growth (WACC × Tg)"))
     w_rng = np.arange(max(0.03, wacc-0.02), wacc+0.025, 0.005)
     t_rng = np.arange(max(0.005, tg-0.01), tg+0.015, 0.005)
     sens_header = [""] + [f"Tg={t:.1%}" for t in t_rng]
@@ -1177,7 +1276,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
     story.append(PageBreak())
 
     # ══ PAGE 3: QUALITY & MULTIPLES ═══════════════════════════════════════════
-    story.append(Paragraph(f"Quality &amp; Multiples: {r['ticker']}", h1))
+    story.extend(_section_header("Quality & Multiples"))
     story.append(Spacer(1, 0.2*cm))
 
     # Quality + C-Score side-by-side
@@ -1205,7 +1304,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
     story.append(Spacer(1, 0.4*cm))
 
     # Historical multiples chart + table
-    story.append(Paragraph("Historical Multiples", h2))
+    story.extend(_section_header("Historical Multiples"))
     mult_fig = _build_multiples_chart(r, C_TEAL, C_CORAL)
     if mult_fig is not None:
         mult_png = _fig_to_png(mult_fig, w=900, h=320)
@@ -1240,22 +1339,23 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
         story.append(hm_tbl)
         story.append(Spacer(1, 0.3*cm))
 
-        # Summary stats
-        story.append(Paragraph("Multiple Ranges", h3))
+        # Summary stats — kept together to avoid orphan single line on next page
+        ranges_block = [Paragraph("Multiple Ranges", h3)]
         for col in ["P/E", "EV/EBITDA", "P/Sales", "FCF Yield"]:
             if col in hm:
                 s = hm[col].dropna()
                 if len(s) >= 3:
                     fmt = "{:.1f}x" if col != "FCF Yield" else "{:.1%}"
-                    story.append(Paragraph(
+                    ranges_block.append(Paragraph(
                         f"<b>{col}</b>: Current {fmt.format(s.iloc[-1])} · "
                         f"Median {fmt.format(s.median())} · "
                         f"Range {fmt.format(s.min())}–{fmt.format(s.max())}", body))
+        story.append(KeepTogether(ranges_block))
 
-    story.append(PageBreak())
+    story.append(Spacer(1, 0.4*cm))
 
-    # ══ PAGE 4: RETURN DECOMPOSITION ══════════════════════════════════════════
-    story.append(Paragraph(f"Return Decomposition: {r['ticker']}", h1))
+    # ══ RETURN DECOMPOSITION ═══════════════════════════════════════════════════
+    story.extend(_section_header("Return Decomposition"))
     rd = r["return_decomposition"]
     if rd.get("available"):
         story.append(Paragraph(
@@ -1313,7 +1413,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
     story.append(PageBreak())
 
     # ══ PAGE 5: PEERS ══════════════════════════════════════════════════════════
-    story.append(Paragraph(f"Peer Comparison: {r['ticker']}", h1))
+    story.extend(_section_header("Peer Comparison"))
     peers = r.get("peers", [])
     if peers:
         # Peer table
@@ -1357,7 +1457,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
             main_p = pdf_p[pdf_p["ticker"].str.contains(own_key)].head(1)
             peer_only = pdf_p[~pdf_p["ticker"].str.contains(own_key)]
             if len(peer_only) > 0 and len(main_p) > 0:
-                story.append(Paragraph("vs Peer Average", h2))
+                story.extend(_section_header("vs Peer Average"))
                 for metric in ["P/E", "EV/EBITDA", "P/Sales", "ROIC", "Gross Mrg", "EBIT Mrg"]:
                     vals = peer_only[metric].dropna() if metric in peer_only else pd.Series(dtype=float)
                     if len(vals) > 0 and metric in main_p and main_p[metric].notna().any():
@@ -1372,7 +1472,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
 
         # Charts
         if len(peers) > 1:
-            story.append(Paragraph("Valuation Comparison", h2))
+            story.extend(_section_header("Valuation Comparison"))
             for metric, fmt in [("P/E", "x"), ("EV/EBITDA", "x")]:
                 pf = _build_peer_chart(peers, model.ticker, metric, fmt, C_TEAL, C_CORAL)
                 if pf is not None:
@@ -1385,7 +1485,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
     story.append(PageBreak())
 
     # ══ PAGE 6: FORWARD DCF ═══════════════════════════════════════════════════
-    story.append(Paragraph(f"Forward DCF: {r['ticker']}", h1))
+    story.extend(_section_header("Forward DCF"))
     story.append(Paragraph("My View vs Market: Fair Value Estimate", h3))
     story.append(Spacer(1, 0.2*cm))
 
@@ -1454,7 +1554,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
             story.append(Spacer(1, 0.4*cm))
 
             # My View vs Market
-            story.append(Paragraph("My View vs Market", h2))
+            story.extend(_section_header("My View vs Market"))
             avg_g = np.mean([float(edited_df.loc["Revenue Growth (%)", f"Y{i+1}"])
                             for i in range(n_fwd)]) / 100
             last_m = float(edited_df.loc["EBIT Margin (%)", f"Y{n_fwd}"]) / 100
@@ -1465,7 +1565,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
             story.append(Spacer(1, 0.3*cm))
 
             # Cash flow table
-            story.append(Paragraph("Projected Cash Flows", h2))
+            story.extend(_section_header("Projected Cash Flows"))
             cf_data = [["Year", "Revenue", "Growth", "EBIT Mrg", "EBIT", "FCFF", "PV"]]
             for row_p in proj_rows:
                 cf_data.append([row_p["Year"], f"{row_p['Revenue']:,.0f}",
@@ -1492,8 +1592,8 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
 
             # Bridge
             story.append(PageBreak())
-            story.append(Paragraph(f"Forward DCF: {r['ticker']} (cont.)", h1))
-            story.append(Paragraph("Valuation Bridge", h2))
+            story.extend(_section_header("Forward DCF (continued)"))
+            story.extend(_section_header("Valuation Bridge"))
             cur_ev = model.market_ev
             ev_from_rev = cur_ev * (rev / model.base_revenue - 1)
             ev_from_m = (cur_ev * ((float(edited_df.loc["EBIT Margin (%)", f"Y{n_fwd}"]) / 100)
@@ -1517,7 +1617,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
             story.append(Spacer(1, 0.4*cm))
 
             # Implied Multiples
-            story.append(Paragraph("Implied Multiples & Plausibility", h2))
+            story.extend(_section_header("Implied Multiples & Plausibility"))
             last_row = proj_rows[-1]
             last_ni = last_row["EBIT"] * (1 - float(
                 edited_df.loc["Tax Rate (%)", f"Y{n_fwd}"]) / 100)
@@ -1565,12 +1665,6 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
                 f"({mos_up:+.1%} from current), {mos_note}", body))
     except Exception as e:
         story.append(Paragraph(f"<b>Forward DCF error:</b> {e}", body))
-
-    # Footer note
-    story.append(Spacer(1, 0.5*cm))
-    story.append(Paragraph(
-        "Generated by CORE DCF Engine. For internal use only, not investment advice.",
-        small))
 
     doc.build(story)
     return buf.getvalue()
