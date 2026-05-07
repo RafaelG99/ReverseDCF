@@ -373,6 +373,9 @@ with tab5:
 
     df_def = pd.DataFrame(defaults).set_index("Metric")
     edited = st.data_editor(df_def, use_container_width=True, num_rows="fixed", key=f"fwd_{r['ticker']}")
+    # Cache for PDF export
+    st.session_state["fwd_edited"] = edited
+    st.session_state["fwd_n"] = n_fwd
 
     try:
         pv_e = 0.0; proj_rows = []; rev = model.base_revenue
@@ -484,3 +487,805 @@ with tab5:
 
     except Exception as e:
         st.error(f"Error: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PDF EXPORT
+# ══════════════════════════════════════════════════════════════════════════════
+def _fig_to_png(fig, w=900, h=420, scale=2):
+    """Plotly figure → PNG bytes via Kaleido."""
+    return fig.to_image(format="png", width=w, height=h, scale=scale, engine="kaleido")
+
+
+def _build_scenario_fan(r, model, C_TEAL, C_CORAL, C_AMBER, C_GREEN, C_RED):
+    sc = r["scenarios"]; labels = ["Bear (25%)", "Base (50%)", "Bull (25%)"]
+    prices = [sc[l.split()[0]]["fair_price"] for l in labels]
+    ups = [sc[l.split()[0]]["upside"] for l in labels]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=labels, y=prices, marker_color=[C_RED, C_AMBER, C_GREEN],
+        text=[f"{p:,.1f}<br>({u:+.0%})" for p, u in zip(prices, ups)],
+        textposition="outside", textfont=dict(size=14, color=C_TEAL)))
+    fig.add_hline(y=r["price"], line_dash="dash", line_color=C_TEAL, line_width=2,
+        annotation_text=f"Current: {r['price']:,.2f}", annotation_position="bottom right")
+    fig.add_hline(y=sc["expected_value"], line_dash="dot", line_color="#8E44AD", line_width=2,
+        annotation_text=f"Expected: {sc['expected_value']:,.1f}", annotation_position="top left")
+    fig.add_hline(y=sc["margin_of_safety_price"], line_dash="dashdot", line_color="#27AE60", line_width=1,
+        annotation_text=f"Entry (MoS): {sc['margin_of_safety_price']:,.1f}", annotation_position="bottom left")
+    fig.update_layout(height=420, showlegend=False, yaxis_title="Fair Price",
+        plot_bgcolor="white", font=dict(family="Arial"),
+        margin=dict(l=50, r=30, t=30, b=40))
+    return fig
+
+
+def _build_tv_pie(r, C_TEAL, C_CORAL):
+    tv = r["tv_decomposition"]
+    fig = go.Figure(go.Pie(labels=["Explicit Period", "Terminal Value"],
+        values=[tv["explicit_pct"], tv["tv_pct"]],
+        marker_colors=[C_TEAL, C_CORAL], hole=0.5,
+        textinfo="label+percent", textfont=dict(size=13)))
+    fig.update_layout(height=380, showlegend=False, font=dict(family="Arial"),
+        margin=dict(l=20, r=20, t=20, b=20),
+        annotations=[dict(text=f"TV<br>{tv['tv_pct']:.0%}", x=0.5, y=0.5,
+            font_size=18, showarrow=False, font_color=C_CORAL)])
+    return fig
+
+
+def _build_multiples_chart(r, C_TEAL, C_CORAL):
+    hm = r["historical_multiples"]
+    if hm.empty: return None
+    fig = go.Figure()
+    for col, color in [("P/E", C_TEAL), ("EV/EBITDA", C_CORAL)]:
+        if col in hm:
+            s = hm[col].dropna()
+            if len(s) > 0:
+                fig.add_trace(go.Scatter(x=s.index, y=s.values, name=col,
+                    line=dict(color=color, width=2), mode="lines+markers"))
+    fig.update_layout(height=320, plot_bgcolor="white", font=dict(family="Arial"),
+        yaxis_title="Multiple", legend=dict(orientation="h"),
+        margin=dict(l=50, r=30, t=20, b=40))
+    return fig
+
+
+def _build_return_decomp(rd, C_TEAL, C_GREEN, C_RED):
+    is_dilution = rd["buyback_ann"] < -0.05
+    bb_label = "Dilution" if is_dilution else "Buyback"
+    comps = [("Revenue<br>Growth", rd["revenue_growth_ann"]),
+             ("Margin<br>Effect", rd["margin_effect_ann"]),
+             (bb_label, rd["buyback_ann"]),
+             ("Dividend", rd["dividend_yield"]),
+             ("Multiple<br>Expansion", rd["multiple_expansion_ann"])]
+    vals = [c[1] for c in comps]
+    fig = go.Figure(go.Waterfall(x=[c[0] for c in comps], y=vals,
+        connector={"line": {"color": "#ccc"}},
+        increasing={"marker": {"color": C_GREEN}},
+        decreasing={"marker": {"color": C_RED}},
+        text=[f"{v:+.1%}" for v in vals],
+        textposition="outside", textfont=dict(size=13)))
+    fig.add_trace(go.Bar(x=["Total<br>Return"], y=[rd["total_return_ann"]],
+        marker_color=C_TEAL, text=[f"{rd['total_return_ann']:+.1%}"],
+        textposition="outside", textfont=dict(size=14, color=C_TEAL), width=0.5))
+    fig.update_layout(height=400, showlegend=False, yaxis_tickformat=".0%",
+        yaxis_title="Annualized", plot_bgcolor="white", font=dict(family="Arial"),
+        margin=dict(l=60, r=30, t=20, b=60))
+    return fig
+
+
+def _build_peer_chart(peers, model_ticker, metric, fmt, C_TEAL, C_CORAL):
+    vals = [(p["ticker"], p.get(metric)) for p in peers if p.get(metric) is not None]
+    if not vals: return None
+    own_key = model_ticker.split()[0] if model_ticker else ""
+    fig = go.Figure(go.Bar(
+        x=[v[0] for v in vals], y=[v[1] for v in vals],
+        marker_color=[C_TEAL if own_key and own_key in v[0] else C_CORAL for v in vals],
+        text=[f"{v[1]:.1f}{fmt}" for v in vals], textposition="outside"))
+    fig.update_layout(height=300, title=metric, showlegend=False,
+        plot_bgcolor="white", font=dict(family="Arial"),
+        margin=dict(l=40, r=20, t=40, b=40))
+    return fig
+
+
+def _build_fwd_compare(avg_g, last_m, ig, model_margin, C_TEAL, C_CORAL):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=["Rev Growth", "EBIT Margin"], y=[avg_g, last_m],
+        name="My View", marker_color=C_TEAL,
+        text=[f"{avg_g:.1%}", f"{last_m:.1%}"], textposition="outside"))
+    fig.add_trace(go.Bar(x=["Rev Growth", "EBIT Margin"], y=[ig, model_margin],
+        name="Market", marker_color=C_CORAL,
+        text=[f"{ig:.1%}", f"{model_margin:.1%}"], textposition="outside"))
+    fig.update_layout(height=300, barmode="group", yaxis_tickformat=".0%",
+        plot_bgcolor="white", font=dict(family="Arial"),
+        margin=dict(l=50, r=30, t=20, b=40))
+    return fig
+
+
+def _build_bridge(cur_ev, ev_from_rev, ev_from_m, ev_res, tot_ev, C_TEAL, C_GREEN, C_RED):
+    fig = go.Figure(go.Waterfall(
+        x=["Current EV", "Revenue<br>Growth", "Margin<br>Change", "Multiple<br>& Other", "Your EV"],
+        y=[cur_ev, ev_from_rev, ev_from_m, ev_res, 0],
+        measure=["absolute", "relative", "relative", "relative", "total"],
+        connector={"line": {"color": "#ccc"}},
+        increasing={"marker": {"color": C_GREEN}},
+        decreasing={"marker": {"color": C_RED}},
+        totals={"marker": {"color": C_TEAL}},
+        text=[f"{cur_ev:,.0f}", f"{ev_from_rev:+,.0f}", f"{ev_from_m:+,.0f}",
+              f"{ev_res:+,.0f}", f"{tot_ev:,.0f}"],
+        textposition="outside", textfont=dict(size=10)))
+    fig.update_layout(height=350, showlegend=False, plot_bgcolor="white",
+        font=dict(family="Arial"), margin=dict(l=50, r=30, t=20, b=40))
+    return fig
+
+
+def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
+    """Generate full multi-page PDF report covering all 5 tabs."""
+    from io import BytesIO
+    from datetime import datetime
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import cm, mm
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
+        TableStyle, Image as RLImage, PageBreak, KeepTogether)
+
+    C_TEAL, C_CORAL, C_AMBER, C_GREEN, C_RED = "#003850", "#F26B43", "#FBAE40", "#2ECC71", "#E74C3C"
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+        leftMargin=1.6*cm, rightMargin=1.6*cm,
+        topMargin=1.4*cm, bottomMargin=1.4*cm,
+        title=f"CORE DCF Report – {r['ticker']}",
+        author="CORE DCF Engine")
+
+    styles = getSampleStyleSheet()
+    h1 = ParagraphStyle("H1", parent=styles["Heading1"], fontName="Helvetica-Bold",
+        fontSize=18, textColor=colors.HexColor(C_TEAL), spaceAfter=8, spaceBefore=4)
+    h2 = ParagraphStyle("H2", parent=styles["Heading2"], fontName="Helvetica-Bold",
+        fontSize=13, textColor=colors.HexColor(C_TEAL), spaceAfter=6, spaceBefore=10)
+    h3 = ParagraphStyle("H3", parent=styles["Heading3"], fontName="Helvetica-Bold",
+        fontSize=11, textColor=colors.HexColor(C_TEAL), spaceAfter=4, spaceBefore=6)
+    body = ParagraphStyle("body", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=9.5, leading=12, spaceAfter=3)
+    small = ParagraphStyle("small", parent=styles["BodyText"], fontName="Helvetica",
+        fontSize=8, leading=10, textColor=colors.HexColor("#666666"))
+    verdict_style = lambda c: ParagraphStyle("v", fontName="Helvetica-Bold",
+        fontSize=20, textColor=colors.HexColor(c), spaceAfter=4, alignment=TA_LEFT)
+
+    story = []
+
+    # ══ PAGE 1: COVER + REVERSE DCF VERDICT ══════════════════════════════════
+    story.append(Paragraph(f"CORE DCF Report — {r['ticker']}", h1))
+    story.append(Paragraph(f"Generated {datetime.now():%d %b %Y, %H:%M} · "
+        f"WACC {wacc:.2%} · Tg {tg:.2%} · Implied Period {proj_years}Y", small))
+    story.append(Spacer(1, 0.3*cm))
+
+    # Verdict box (replicate Tab 1 logic)
+    ig = r["implied_growth"]; c5 = r["cagr_5y"]; c3 = r["cagr_3y"]
+    tv_pct = r["tv_decomposition"]["tv_pct"]; spread = wacc - tg
+    roic_sp = r["roic_spread"]
+    red_flags = sum(1 for c in r["plausibility"] if c["flag"] == "🔴")
+
+    if spread < 0.02:
+        verdict, v_color = "RESULT UNRELIABLE", C_RED
+        v_action = f"WACC ({wacc:.2%}) too close to Tg ({tg:.2%})."
+    elif ig < -0.10:
+        ev0 = model._ev_from_fcf_growth(0.0)
+        ratio = ev0 / model.market_ev if model.market_ev else 0
+        verdict, v_color = "CHECK INPUTS", C_RED
+        v_action = (f"Even 0% growth gives {ratio:.1f}x market EV. WACC ({wacc:.2%}) likely too low."
+                    if ratio > 2 else "Extreme decline implied. Check data.")
+    elif ig < -0.03 and c5 > 0.02:
+        verdict, v_color = "POTENTIALLY UNDERVALUED", C_GREEN
+        v_action = f"Market prices in {ig:.1%} decline, but historically +{c5:.1%} p.a."
+    elif -0.03 <= ig <= 0.03:
+        if c5 > 0.05:
+            verdict, v_color = "POTENTIALLY UNDERVALUED", C_GREEN
+            v_action = f"Market implies flat ({ig:.1%}), but historical CAGR was {c5:.1%}."
+        else:
+            verdict, v_color = "FAIRLY VALUED", C_AMBER
+            v_action = f"Implied {ig:.1%} roughly in line with historical {c5:.1%}."
+    elif red_flags >= 3:
+        verdict, v_color = "OVERPRICED", C_RED
+        v_action = "Market expects growth well beyond history."
+    elif red_flags >= 2:
+        verdict, v_color = "LIKELY OVERPRICED", C_CORAL
+        v_action = "Expectations stretched vs history."
+    elif red_flags == 0 and roic_sp > 0:
+        verdict, v_color = "FAIRLY VALUED", C_GREEN
+        v_action = "Expectations achievable based on history."
+    else:
+        verdict, v_color = "FAIR VALUE RANGE", C_AMBER
+        v_action = "Mixed signals."
+
+    story.append(Paragraph(verdict, verdict_style(v_color)))
+    story.append(Paragraph(
+        f"Market implies <b>{ig:.1%} p.a. FCF growth</b> (Y3-{2+proj_years}) "
+        f"to justify {r['price']:,.2f}.", body))
+    story.append(Paragraph(f"<b>So what?</b> {v_action}", body))
+    story.append(Spacer(1, 0.3*cm))
+
+    # KPI table (6 metrics)
+    sc = r["scenarios"]; q = r["quality"]
+    kpi_data = [
+        ["Price", "Implied Growth", "WACC", "TV %", "ROIC Spread", "Quality"],
+        [f"{r['price']:,.2f}",
+         f"{ig:.1%}",
+         f"{wacc:.2%}",
+         f"{tv_pct:.0%}",
+         f"{roic_sp:+.1%}",
+         f"{q.grade} (C-Score {q.c_score.total}/5)"]
+    ]
+    kpi_tbl = Table(kpi_data, colWidths=[2.9*cm]*6)
+    kpi_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(C_TEAL)),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(kpi_tbl)
+    story.append(Spacer(1, 0.3*cm))
+
+    # Expected Value strip
+    mid_m = r.get("mid_cycle_margin", model.ebit_margin)
+    m_range = r.get("margin_range", (mid_m, mid_m))
+    ev_data = [
+        ["Expected Value", "Entry (20% MoS)", "Mid-Cycle Margin"],
+        [f"{sc['expected_value']:,.1f}  ({sc['expected_upside']:+.1%})",
+         f"{sc['margin_of_safety_price']:,.1f}  ({sc['margin_of_safety_upside']:+.1%})",
+         f"{mid_m:.1%}  (Range: {m_range[0]:.1%}–{m_range[1]:.1%})"]
+    ]
+    ev_tbl = Table(ev_data, colWidths=[5.8*cm]*3)
+    ev_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f0f4f6")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(C_TEAL)),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(ev_tbl)
+    story.append(Spacer(1, 0.4*cm))
+
+    # Scenario Fan + TV Pie side by side
+    story.append(Paragraph("Scenario Fan & TV Decomposition", h2))
+    fan_png = _fig_to_png(_build_scenario_fan(r, model, C_TEAL, C_CORAL, C_AMBER, C_GREEN, C_RED), w=700, h=400)
+    pie_png = _fig_to_png(_build_tv_pie(r, C_TEAL, C_CORAL), w=500, h=400)
+    fan_img = RLImage(BytesIO(fan_png), width=10.6*cm, height=6.0*cm)
+    pie_img = RLImage(BytesIO(pie_png), width=7.0*cm, height=5.6*cm)
+    chart_tbl = Table([[fan_img, pie_img]], colWidths=[10.8*cm, 7.2*cm])
+    chart_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+    story.append(chart_tbl)
+    story.append(Paragraph(
+        f"Expected Value = 25%×Bear + 50%×Base + 25%×Bull. Entry = Expected × 80%. "
+        f"{'⚠️ TV > 60% — sensitive to assumptions.' if tv_pct > 0.6 else '✓ Healthy TV split.'}",
+        small))
+
+    story.append(PageBreak())
+
+    # ══ PAGE 2: PLAUSIBILITY + INPUTS + SENSITIVITY ══════════════════════════
+    story.append(Paragraph("Plausibility Checks", h2))
+    plaus_data = [["Flag", "Check", "Implied", "Historical", "Ratio"]]
+    flag_map = {"🟢": "OK", "🟡": "WARN", "🔴": "FAIL"}
+    for c in r["plausibility"]:
+        plaus_data.append([flag_map.get(c["flag"], c["flag"]),
+            c["check"], c["implied"], c["historical"], c["ratio"]])
+    plaus_tbl = Table(plaus_data, colWidths=[1.6*cm, 4.0*cm, 2.6*cm, 2.6*cm, 2.4*cm])
+    plaus_style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(C_TEAL)),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("ALIGN", (1, 1), (1, -1), "LEFT"),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
+    ]
+    for i, c in enumerate(r["plausibility"], start=1):
+        if c["flag"] == "🔴":
+            plaus_style.append(("BACKGROUND", (0, i), (0, i), colors.HexColor(C_RED)))
+            plaus_style.append(("TEXTCOLOR", (0, i), (0, i), colors.white))
+        elif c["flag"] == "🟡":
+            plaus_style.append(("BACKGROUND", (0, i), (0, i), colors.HexColor(C_AMBER)))
+        elif c["flag"] == "🟢":
+            plaus_style.append(("BACKGROUND", (0, i), (0, i), colors.HexColor(C_GREEN)))
+            plaus_style.append(("TEXTCOLOR", (0, i), (0, i), colors.white))
+    plaus_tbl.setStyle(TableStyle(plaus_style))
+    story.append(plaus_tbl)
+    story.append(Spacer(1, 0.4*cm))
+
+    # Model Inputs
+    story.append(Paragraph("Model Inputs", h2))
+    inputs_lines = [
+        f"<b>Base Revenue:</b> {model.base_revenue:,.0f} · "
+        f"<b>EBIT Margin:</b> {model.ebit_margin:.1%} (Mid-Cycle: {model.mid_cycle_margin:.1%})",
+        f"<b>FCFF:</b> {model.base_fcff:,.0f} ({model.base_fcff/model.base_revenue:.1%} margin) · "
+        f"<b>FCFF/Share:</b> {model.base_fcff_per_share:,.2f}",
+        f"<b>D&amp;A:</b> {model.da_pct:.1%} · <b>CapEx:</b> {model.capex_pct:.1%} · "
+        f"<b>SBC:</b> {model.sbc_pct:.1%} · <b>Tax:</b> {model.tax_rate:.1%}",
+        f"<b>DSO:</b> {model.dso:.0f} days · <b>DPI:</b> {model.dpi:.0f} days · "
+        f"<b>NWC/Rev:</b> {model.nwc_change_pct:.1%}",
+        f"<b>MCap:</b> {model.market_cap:,.0f} · <b>Net Debt:</b> {model.net_debt:,.0f} "
+        f"(Lease: {model.lease_liab:,.0f}) · <b>EV:</b> {model.market_ev:,.0f}",
+        f"<b>Consensus FY1:</b> {model.consensus_growth_fy1:+.1%} · "
+        f"<b>FY2:</b> {model.consensus_growth_fy2:+.1%}",
+    ]
+    for ln in inputs_lines:
+        story.append(Paragraph(ln, body))
+    story.append(Spacer(1, 0.4*cm))
+
+    # Sensitivity table (recompute as in app)
+    story.append(Paragraph("Sensitivity: Implied Growth (WACC × Tg)", h2))
+    w_rng = np.arange(max(0.03, wacc-0.02), wacc+0.025, 0.005)
+    t_rng = np.arange(max(0.005, tg-0.01), tg+0.015, 0.005)
+    sens_header = [""] + [f"Tg={t:.1%}" for t in t_rng]
+    sens_data = [sens_header]
+    for w in w_rng:
+        row = [f"{w:.1%}"]
+        for t in t_rng:
+            cfg = DCFConfig(wacc=w, terminal_growth=t, implied_years=proj_years)
+            m2 = CoreDCF(model.hist, model.current, cfg, ticker=r["ticker"])
+            row.append(f"{m2.solve_implied_growth():.1%}")
+        sens_data.append(row)
+    sens_tbl = Table(sens_data, colWidths=[1.7*cm] + [2.0*cm]*len(t_rng))
+    sens_style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(C_TEAL)),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor(C_TEAL)),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
+    ]
+    sens_tbl.setStyle(TableStyle(sens_style))
+    story.append(sens_tbl)
+
+    # Warnings if any
+    if r.get("warnings"):
+        story.append(Spacer(1, 0.3*cm))
+        story.append(Paragraph("Data Notes", h3))
+        for w in r["warnings"]:
+            story.append(Paragraph(f"• {w}", small))
+
+    story.append(PageBreak())
+
+    # ══ PAGE 3: QUALITY & MULTIPLES ═══════════════════════════════════════════
+    story.append(Paragraph(f"Quality & Multiples — {r['ticker']}", h1))
+    story.append(Spacer(1, 0.2*cm))
+
+    # Quality + C-Score side-by-side
+    qual_lines = [
+        Paragraph(f"<b>Quality Grade: {q.grade}</b>", h3),
+        Paragraph(f"ROIC (median): <b>{q.roic_median:.1%}</b> ({q.roic_trend})", body),
+        Paragraph(f"Margin Stability: <b>{q.margin_stability:.2%}</b> std dev", body),
+        Paragraph(f"Revenue Volatility: <b>{q.revenue_volatility:.1%}</b> std dev", body),
+        Paragraph(f"FCF Conversion (CFO/NI): <b>{q.fcf_conversion:.2f}x</b>", body),
+        Paragraph(f"Payout Ratio: <b>{q.payout_avg:.0%}</b>", body),
+        Paragraph(f"Debt/EBITDA: <b>{q.debt_ebitda:.1f}x</b>", body),
+    ]
+    cscore_lines = [Paragraph(f"<b>C-Score: {q.c_score.total}/5</b>", h3),
+                    Paragraph("Lower = better quality. Each flag = 1 point.", small)]
+    for k, v in q.c_score.details.items():
+        is_bad = ("Declining" in v or "Increasing" in v or ">" in v)
+        marker = "[FAIL]" if is_bad else "[OK]"
+        color = C_RED if is_bad else C_GREEN
+        cscore_lines.append(Paragraph(
+            f"<font color='{color}'><b>{marker}</b></font> <b>{k}</b>: {v}", body))
+
+    ql_tbl = Table([[qual_lines, cscore_lines]], colWidths=[9.0*cm, 9.0*cm])
+    ql_tbl.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
+    story.append(ql_tbl)
+    story.append(Spacer(1, 0.4*cm))
+
+    # Historical multiples chart + table
+    story.append(Paragraph("Historical Multiples", h2))
+    mult_fig = _build_multiples_chart(r, C_TEAL, C_CORAL)
+    if mult_fig is not None:
+        mult_png = _fig_to_png(mult_fig, w=900, h=320)
+        story.append(RLImage(BytesIO(mult_png), width=18.0*cm, height=6.4*cm))
+        story.append(Spacer(1, 0.2*cm))
+
+        # Table
+        hm = r["historical_multiples"]
+        hm_cols = [c for c in ["P/E", "EV/EBITDA", "P/Sales", "FCF Yield"] if c in hm.columns]
+        hm_data = [["Year"] + hm_cols]
+        for yr in hm.index:
+            row = [str(yr)]
+            for col in hm_cols:
+                v = hm.loc[yr, col]
+                if pd.isna(v):
+                    row.append("—")
+                elif col == "FCF Yield":
+                    row.append(f"{v:.1%}")
+                else:
+                    row.append(f"{v:.1f}x")
+            hm_data.append(row)
+        hm_tbl = Table(hm_data, colWidths=[1.8*cm] + [3.4*cm]*len(hm_cols))
+        hm_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(C_TEAL)),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
+        ]))
+        story.append(hm_tbl)
+        story.append(Spacer(1, 0.3*cm))
+
+        # Summary stats
+        story.append(Paragraph("Multiple Ranges", h3))
+        for col in ["P/E", "EV/EBITDA", "P/Sales", "FCF Yield"]:
+            if col in hm:
+                s = hm[col].dropna()
+                if len(s) >= 3:
+                    fmt = "{:.1f}x" if col != "FCF Yield" else "{:.1%}"
+                    story.append(Paragraph(
+                        f"<b>{col}</b>: Current {fmt.format(s.iloc[-1])} · "
+                        f"Median {fmt.format(s.median())} · "
+                        f"Range {fmt.format(s.min())}–{fmt.format(s.max())}", body))
+
+    story.append(PageBreak())
+
+    # ══ PAGE 4: RETURN DECOMPOSITION ══════════════════════════════════════════
+    story.append(Paragraph(f"Return Decomposition — {r['ticker']}", h1))
+    rd = r["return_decomposition"]
+    if rd.get("available"):
+        story.append(Paragraph(
+            f"Stock Return Breakdown ({rd['start_year']}–{rd['end_year']})", h2))
+
+        rd_png = _fig_to_png(_build_return_decomp(rd, C_TEAL, C_GREEN, C_RED), w=900, h=400)
+        story.append(RLImage(BytesIO(rd_png), width=18.0*cm, height=8.0*cm))
+        story.append(Spacer(1, 0.3*cm))
+
+        is_dilution = rd["buyback_ann"] < -0.05
+        story.append(Paragraph("Annualized Components", h3))
+        comp_lines = [
+            f"Revenue Growth: <b>{rd['revenue_growth_ann']:+.1%}</b>",
+            f"Margin Effect: <b>{rd['margin_effect_ann']:+.1%}</b> "
+            f"({rd['margin_first']:.1%} → {rd['margin_last']:.1%})",
+        ]
+        if is_dilution:
+            comp_lines.append(
+                f"Dilution: <b>{rd['buyback_ann']:+.1%}</b> "
+                f"({rd['shares_first']:,.0f} → {rd['shares_last']:,.0f} shares)")
+        else:
+            comp_lines.append(
+                f"Buyback Yield: <b>{rd['buyback_ann']:+.1%}</b> "
+                f"({rd['shares_first']:,.0f} → {rd['shares_last']:,.0f})")
+        comp_lines.append(f"Dividend Yield: <b>{rd['dividend_yield']:.1%}</b>")
+        comp_lines.append(
+            f"Multiple Expansion: <b>{rd['multiple_expansion_ann']:+.1%}</b>"
+            f"{' (unreliable due to dilution)' if is_dilution else ''}")
+        comp_lines.append(f"<b>Total Return: {rd['total_return_ann']:+.1%} p.a.</b>")
+        comp_lines.append(f"Price: {rd['price_first']:,.1f} → {rd['price_last']:,.1f}")
+        for ln in comp_lines:
+            story.append(Paragraph(f"• {ln}", body))
+
+        # Quality interpretation
+        fundamental = rd["revenue_growth_ann"] + rd["margin_effect_ann"]
+        multiple = rd["multiple_expansion_ann"]; total = rd["total_return_ann"]
+        if abs(total) > 0.005 and not is_dilution:
+            story.append(Spacer(1, 0.2*cm))
+            if multiple > 0.02:
+                story.append(Paragraph(
+                    f"<b>WARNING:</b> {multiple/total*100:.0f}% of return from multiple expansion — "
+                    f"not sustainable.", body))
+            elif multiple < -0.02:
+                story.append(Paragraph(
+                    f"<b>NOTE:</b> Multiple contracted {multiple:.1%} p.a. — "
+                    f"fundamentals outperformed the stock.", body))
+            if total > 0 and fundamental / total > 0.7:
+                story.append(Paragraph(
+                    f"<b>QUALITY:</b> {fundamental/total*100:.0f}% of return from fundamentals — "
+                    f"high quality.", body))
+    else:
+        story.append(Paragraph("Return decomposition not available. "
+            "Need historical Price (YE) data in Fundamentals sheet.", body))
+
+    story.append(PageBreak())
+
+    # ══ PAGE 5: PEERS ══════════════════════════════════════════════════════════
+    story.append(Paragraph(f"Peer Comparison — {r['ticker']}", h1))
+    peers = r.get("peers", [])
+    if peers:
+        # Peer table
+        own_key = model.ticker.split()[0] if model.ticker else ""
+        peer_cols = ["P/E", "EV/EBITDA", "P/Sales", "Div Yld", "ROIC", "Gross Mrg", "EBIT Mrg"]
+        peer_data = [["Ticker", "Name"] + peer_cols]
+        for p in peers:
+            row = [p.get("ticker", ""), str(p.get("name", ""))[:24]]
+            for col in peer_cols:
+                v = p.get(col)
+                if v is None or (isinstance(v, float) and np.isnan(v)):
+                    row.append("—")
+                elif col in ("P/E", "EV/EBITDA", "P/Sales"):
+                    row.append(f"{v:.1f}x")
+                else:
+                    row.append(f"{v:.1f}%")
+            peer_data.append(row)
+        peer_tbl = Table(peer_data, colWidths=[2.0*cm, 3.6*cm] + [1.7*cm]*len(peer_cols))
+        ptbl_style = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(C_TEAL)),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("ALIGN", (1, 1), (1, -1), "LEFT"),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
+        ]
+        # Highlight main row
+        for i, p in enumerate(peers, start=1):
+            if own_key and own_key in p.get("ticker", ""):
+                ptbl_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#fff4ec")))
+                ptbl_style.append(("FONTNAME", (0, i), (-1, i), "Helvetica-Bold"))
+        peer_tbl.setStyle(TableStyle(ptbl_style))
+        story.append(peer_tbl)
+        story.append(Spacer(1, 0.4*cm))
+
+        # vs Peer Average
+        pdf_p = pd.DataFrame(peers)
+        if own_key:
+            main_p = pdf_p[pdf_p["ticker"].str.contains(own_key)].head(1)
+            peer_only = pdf_p[~pdf_p["ticker"].str.contains(own_key)]
+            if len(peer_only) > 0 and len(main_p) > 0:
+                story.append(Paragraph("vs Peer Average", h2))
+                for metric in ["P/E", "EV/EBITDA", "P/Sales", "ROIC", "Gross Mrg", "EBIT Mrg"]:
+                    vals = peer_only[metric].dropna() if metric in peer_only else pd.Series(dtype=float)
+                    if len(vals) > 0 and metric in main_p and main_p[metric].notna().any():
+                        avg = vals.mean(); own = float(main_p[metric].iloc[0])
+                        diff = own - avg
+                        fmt = "{:.1f}x" if metric in ["P/E", "EV/EBITDA", "P/Sales"] else "{:.1f}%"
+                        prem = "premium" if diff > 0 else "discount"
+                        story.append(Paragraph(
+                            f"<b>{metric}</b>: {fmt.format(own)} vs Peer Avg "
+                            f"{fmt.format(avg)} ({prem}: {abs(diff):.1f})", body))
+                story.append(Spacer(1, 0.3*cm))
+
+        # Charts
+        if len(peers) > 1:
+            story.append(Paragraph("Valuation Comparison", h2))
+            for metric, fmt in [("P/E", "x"), ("EV/EBITDA", "x")]:
+                pf = _build_peer_chart(peers, model.ticker, metric, fmt, C_TEAL, C_CORAL)
+                if pf is not None:
+                    pf_png = _fig_to_png(pf, w=900, h=300)
+                    story.append(RLImage(BytesIO(pf_png), width=16.0*cm, height=5.4*cm))
+                    story.append(Spacer(1, 0.2*cm))
+    else:
+        story.append(Paragraph("No peer data found. Add peer tickers in the Peers sheet.", body))
+
+    story.append(PageBreak())
+
+    # ══ PAGE 6: FORWARD DCF ═══════════════════════════════════════════════════
+    story.append(Paragraph(f"Forward DCF — {r['ticker']}", h1))
+    story.append(Paragraph("My View vs Market — Fair Value Estimate", h3))
+    story.append(Spacer(1, 0.2*cm))
+
+    # Recompute Forward DCF using cached edited DataFrame
+    try:
+        pv_e = 0.0; proj_rows = []; rev = model.base_revenue
+        for i in range(n_fwd):
+            col = f"Y{i+1}"
+            g = float(edited_df.loc["Revenue Growth (%)", col]) / 100
+            m = float(edited_df.loc["EBIT Margin (%)", col]) / 100
+            cx = float(edited_df.loc["CapEx/Rev (%)", col]) / 100
+            da = float(edited_df.loc["D&A/Rev (%)", col]) / 100
+            sbc = float(edited_df.loc["SBC/Rev (%)", col]) / 100
+            tx = float(edited_df.loc["Tax Rate (%)", col]) / 100
+            rev *= (1 + g); ebit = rev * m; nopat = ebit * (1 - tx)
+            fcff = nopat + rev*da - rev*cx - rev*sbc
+            pv = fcff / (1 + wacc)**(i+1); pv_e += pv
+            proj_rows.append({"Year": col, "Revenue": rev, "Growth": g,
+                "EBIT Margin": m, "EBIT": ebit, "FCFF": fcff, "PV": pv})
+
+        tg_f = float(edited_df.loc["Revenue Growth (%)", "Terminal"]) / 100
+        tm_f = float(edited_df.loc["EBIT Margin (%)", "Terminal"]) / 100
+        cx_f = float(edited_df.loc["CapEx/Rev (%)", "Terminal"]) / 100
+        da_f = float(edited_df.loc["D&A/Rev (%)", "Terminal"]) / 100
+        sbc_f = float(edited_df.loc["SBC/Rev (%)", "Terminal"]) / 100
+        tx_f = float(edited_df.loc["Tax Rate (%)", "Terminal"]) / 100
+        t_rev = rev * (1 + tg_f); t_nopat = t_rev * tm_f * (1 - tx_f)
+        t_fcff = t_nopat + t_rev*da_f - t_rev*cx_f - t_rev*sbc_f
+
+        if wacc <= tg_f:
+            story.append(Paragraph("<b>ERROR:</b> WACC must exceed Terminal Growth.", body))
+        else:
+            tv_v = t_fcff / (wacc - tg_f); pv_tv = tv_v / (1 + wacc)**n_fwd
+            tot_ev = pv_e + pv_tv
+            fair_eq = tot_ev - model.net_debt - model.minority
+            fp = fair_eq / model.shares if model.shares else 0
+            up = fp / model.price - 1 if model.price else 0
+
+            if up > 0.20: fv, fc = "UNDERVALUED", C_GREEN
+            elif up > 0.05: fv, fc = "SLIGHT UPSIDE", C_GREEN
+            elif up > -0.05: fv, fc = "FAIRLY VALUED", C_AMBER
+            elif up > -0.20: fv, fc = "SLIGHT DOWNSIDE", C_CORAL
+            else: fv, fc = "OVERVALUED", C_RED
+
+            story.append(Paragraph(fv, verdict_style(fc)))
+            story.append(Paragraph(
+                f"Fair value: <b>{fp:,.1f}</b> vs {model.price:,.2f} → <b>{up:+.1%}</b>", body))
+            story.append(Spacer(1, 0.2*cm))
+
+            # KPI strip
+            fwd_kpi = [["Current", "Fair Value", "EV", "TV %"],
+                       [f"{model.price:,.2f}", f"{fp:,.1f}  ({up:+.1%})",
+                        f"{tot_ev:,.0f}", f"{pv_tv/tot_ev:.0%}"]]
+            fwd_tbl = Table(fwd_kpi, colWidths=[4.5*cm]*4)
+            fwd_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(C_TEAL)),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTNAME", (0, 1), (-1, 1), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
+            ]))
+            story.append(fwd_tbl)
+            story.append(Spacer(1, 0.4*cm))
+
+            # My View vs Market
+            story.append(Paragraph("My View vs Market", h2))
+            avg_g = np.mean([float(edited_df.loc["Revenue Growth (%)", f"Y{i+1}"])
+                            for i in range(n_fwd)]) / 100
+            last_m = float(edited_df.loc["EBIT Margin (%)", f"Y{n_fwd}"]) / 100
+            cmp_png = _fig_to_png(
+                _build_fwd_compare(avg_g, last_m, ig, model.ebit_margin, C_TEAL, C_CORAL),
+                w=900, h=300)
+            story.append(RLImage(BytesIO(cmp_png), width=16.0*cm, height=5.4*cm))
+            story.append(Spacer(1, 0.3*cm))
+
+            # Cash flow table
+            story.append(Paragraph("Projected Cash Flows", h2))
+            cf_data = [["Year", "Revenue", "Growth", "EBIT Mrg", "EBIT", "FCFF", "PV"]]
+            for row_p in proj_rows:
+                cf_data.append([row_p["Year"], f"{row_p['Revenue']:,.0f}",
+                    f"{row_p['Growth']:.1%}", f"{row_p['EBIT Margin']:.1%}",
+                    f"{row_p['EBIT']:,.0f}", f"{row_p['FCFF']:,.0f}", f"{row_p['PV']:,.0f}"])
+            cf_data.append(["Terminal", f"{t_rev:,.0f}", f"{tg_f:.1%}", f"{tm_f:.1%}",
+                f"{t_rev*tm_f:,.0f}", f"{t_fcff:,.0f}", f"{pv_tv:,.0f}"])
+            cf_tbl = Table(cf_data, colWidths=[1.6*cm, 2.6*cm, 1.6*cm, 1.8*cm, 2.6*cm, 2.6*cm, 2.6*cm])
+            cf_style = [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(C_TEAL)),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+                ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+                ("ALIGN", (0, 0), (0, -1), "CENTER"),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
+                ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#fff4ec")),
+                ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ]
+            cf_tbl.setStyle(TableStyle(cf_style))
+            story.append(cf_tbl)
+            story.append(Spacer(1, 0.4*cm))
+
+            # Bridge
+            story.append(PageBreak())
+            story.append(Paragraph(f"Forward DCF — {r['ticker']} (cont.)", h1))
+            story.append(Paragraph("Valuation Bridge", h2))
+            cur_ev = model.market_ev
+            ev_from_rev = cur_ev * (rev / model.base_revenue - 1)
+            ev_from_m = (cur_ev * ((float(edited_df.loc["EBIT Margin (%)", f"Y{n_fwd}"]) / 100)
+                / model.ebit_margin - 1)) if model.ebit_margin else 0
+            ev_res = tot_ev - cur_ev - ev_from_rev - ev_from_m
+            br_png = _fig_to_png(
+                _build_bridge(cur_ev, ev_from_rev, ev_from_m, ev_res, tot_ev, C_TEAL, C_GREEN, C_RED),
+                w=900, h=350)
+            story.append(RLImage(BytesIO(br_png), width=18.0*cm, height=7.0*cm))
+            story.append(Spacer(1, 0.2*cm))
+
+            br_lines = [
+                f"PV Explicit: <b>{pv_e:,.0f}</b>",
+                f"PV Terminal: <b>{pv_tv:,.0f}</b>",
+                f"= EV: <b>{tot_ev:,.0f}</b>",
+                f"− Net Debt: {model.net_debt:,.0f}",
+                f"= Equity: <b>{fair_eq:,.0f}</b> ÷ {model.shares:,.1f} = <b>{fp:,.1f}</b>",
+            ]
+            for ln in br_lines:
+                story.append(Paragraph(f"• {ln}", body))
+            story.append(Spacer(1, 0.4*cm))
+
+            # Implied Multiples
+            story.append(Paragraph("Implied Multiples & Plausibility", h2))
+            last_row = proj_rows[-1]
+            last_ni = last_row["EBIT"] * (1 - float(
+                edited_df.loc["Tax Rate (%)", f"Y{n_fwd}"]) / 100)
+            impl = model.implied_multiples(tot_ev,
+                projected_revenue=last_row["Revenue"],
+                projected_ebit=last_row["EBIT"],
+                projected_ebitda=last_row.get("EBITDA", last_row["EBIT"] * 1.3),
+                projected_ni=last_ni)
+            hm = r["historical_multiples"]
+            im_data = [["Metric", "Implied", "Hist Median", "Verdict"]]
+            for metric, hist_col in [("implied_EV/EBIT", "EV/EBITDA"),
+                                       ("implied_P/E", "P/E"),
+                                       ("implied_P/Sales", "P/Sales")]:
+                val = impl.get(metric)
+                if val and not np.isnan(val):
+                    h_med = (hm[hist_col].dropna().median()
+                        if hist_col in hm and len(hm[hist_col].dropna()) > 0 else None)
+                    label = metric.replace("implied_", "")
+                    if h_med and not np.isnan(h_med):
+                        verd = "STRETCHED" if val > h_med * 1.2 else (
+                            "CHEAP" if val < h_med * 0.8 else "in line")
+                        im_data.append([label, f"{val:.1f}x", f"{h_med:.1f}x", verd])
+                    else:
+                        im_data.append([label, f"{val:.1f}x", "—", "—"])
+            im_tbl = Table(im_data, colWidths=[3.5*cm, 3.0*cm, 3.0*cm, 4.0*cm])
+            im_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(C_TEAL)),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#dddddd")),
+            ]))
+            story.append(im_tbl)
+            story.append(Spacer(1, 0.4*cm))
+
+            # Margin of Safety
+            mos_price = fp * 0.80
+            mos_up = mos_price / model.price - 1 if model.price else 0
+            mos_note = ("Current price is below entry target."
+                if model.price < mos_price else "Wait for better entry.")
+            story.append(Paragraph(
+                f"<b>Entry Target (20% Margin of Safety):</b> {mos_price:,.1f} "
+                f"({mos_up:+.1%} from current) — {mos_note}", body))
+    except Exception as e:
+        story.append(Paragraph(f"<b>Forward DCF error:</b> {e}", body))
+
+    # Footer note
+    story.append(Spacer(1, 0.5*cm))
+    story.append(Paragraph(
+        "Generated by CORE DCF Engine. For internal use only — not investment advice.",
+        small))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+# ── Sidebar PDF Export Button ────────────────────────────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📄 Report")
+
+if st.sidebar.button("Generate PDF", use_container_width=True):
+    edited_df = st.session_state.get("fwd_edited")
+    n_fwd = st.session_state.get("fwd_n")
+    if edited_df is None or n_fwd is None:
+        st.sidebar.warning("Open the Forward DCF tab once to initialize assumptions, "
+            "then re-click.")
+    else:
+        with st.spinner("Building PDF..."):
+            try:
+                pdf_bytes = build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd)
+                st.sidebar.success(f"✓ {len(pdf_bytes)/1024:.0f} KB")
+                st.sidebar.download_button(
+                    "⬇ Download PDF",
+                    data=pdf_bytes,
+                    file_name=f"CORE_DCF_{r['ticker'].replace(' ', '_')}_{pd.Timestamp.now():%Y%m%d}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                st.sidebar.error(f"PDF error: {e}")
+                import traceback
+                with st.expander("Traceback"):
+                    st.code(traceback.format_exc())
+
+st.sidebar.caption("Tip: Forward DCF tab assumptions feed into the PDF.")
