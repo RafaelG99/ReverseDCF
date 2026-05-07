@@ -35,12 +35,40 @@ if bbg_w and 0.01 < bbg_w < 0.25:
     st.sidebar.caption(f"BBG WACC: {bbg_w:.2%}")
 else:
     wacc = st.sidebar.number_input("WACC (%)", value=8.0, step=0.25, format="%.2f") / 100
-
 tg = st.sidebar.slider("Terminal Growth (%)", 0.0, 3.0, min(round(model.config.terminal_growth*100,1),1.5), 0.1) / 100
 proj_years = st.sidebar.slider("Implied Period (Y)", 5, 15, model.config.implied_years)
 use_midcycle = st.sidebar.checkbox("Use Mid-Cycle Margin for Base FCFF", value=True,
     help="ON (default): Base FCFF normalized to mid-cycle margin (trimmed mean last 7Y). "
          "OFF: Base FCFF uses current margin (peak/trough sensitive).")
+
+# ── AI Layer Controls ─────────────────────────────────────────────────────────
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🤖 AI Layer (Claude Opus 4.7)")
+api_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
+ai_available = bool(api_key)
+if not ai_available:
+    st.sidebar.caption("⚠ No API key. Add ANTHROPIC_API_KEY in secrets.toml.")
+
+ai_smart_wacc = st.sidebar.checkbox("Smart WACC/Tg Defaults", value=ai_available, disabled=not ai_available,
+    help="Bottom-up plausibilization of WACC and Terminal Growth.")
+ai_smart_fwd = st.sidebar.checkbox("Smart Forward DCF Pre-Fill", value=ai_available, disabled=not ai_available,
+    help="Sector-aware Forward DCF trajectory based on consensus + secular trends.")
+ai_commentary = st.sidebar.checkbox("AI Investment Commentary in PDF", value=ai_available, disabled=not ai_available,
+    help="1-page Executive Summary: thesis, cases, verdict, catalysts.")
+
+# Apply AI WACC/Tg if user hasn't manually overridden them
+ai_wacc_tg = None
+if ai_smart_wacc and ai_available:
+    cache_key = f"ai_wacc_tg_{model.ticker}"
+    if cache_key not in st.session_state:
+        with st.sidebar:
+            with st.spinner("AI: WACC/Tg analysis..."):
+                from ai_layer import smart_wacc_tg
+                st.session_state[cache_key] = smart_wacc_tg(api_key, model)
+    ai_wacc_tg = st.session_state.get(cache_key)
+    if ai_wacc_tg:
+        st.sidebar.caption(f"💡 AI suggests WACC {ai_wacc_tg.get('wacc_recommended', 0):.2%}, "
+                          f"Tg {ai_wacc_tg.get('tg_recommended', 0):.2%}")
 
 model.config.wacc = wacc
 model.config.terminal_growth = tg
@@ -364,15 +392,47 @@ with tab5:
     # This way you START at market expectations and adjust from there
     implied_g = r["implied_growth"]
     mid_margin = r.get("mid_cycle_margin", model.ebit_margin)
-    
-    st.caption(f"Defaults: Implied growth ({implied_g:.1%}) from Reverse DCF. Margin fades from current ({model.ebit_margin:.1%}) to mid-cycle ({mid_margin:.1%}). Adjust to reflect YOUR view.")
+
+    # Try AI-powered Smart Pre-Fill first
+    ai_fwd = None
+    if ai_smart_fwd and ai_available:
+        cache_key_fwd = f"ai_fwd_{r['ticker']}_{n_fwd}_{round(wacc,4)}_{round(tg,4)}"
+        if cache_key_fwd not in st.session_state:
+            with st.spinner("AI: Building sector-aware Forward DCF trajectory..."):
+                from ai_layer import smart_forward_prefill
+                st.session_state[cache_key_fwd] = smart_forward_prefill(api_key, model, r, n_fwd=n_fwd)
+        ai_fwd = st.session_state.get(cache_key_fwd)
+
+    if ai_fwd and "years" in ai_fwd:
+        st.caption(f"💡 **AI Pre-Fill aktiv:** {ai_fwd.get('rationale', '')}")
+    else:
+        st.caption(f"Defaults: Implied growth ({implied_g:.1%}) from Reverse DCF. "
+                   f"Margin fades from current ({model.ebit_margin:.1%}) to mid-cycle ({mid_margin:.1%}). "
+                   f"Adjust to reflect YOUR view.")
 
     defaults = {"Metric": ["Revenue Growth (%)", "EBIT Margin (%)", "CapEx/Rev (%)", "D&A/Rev (%)", "SBC/Rev (%)", "Tax Rate (%)"],
                 "Base": ["—", round(model.ebit_margin*100,1), round(model.capex_pct*100,1), round(model.da_pct*100,1), round(model.sbc_pct*100,1), round(model.tax_rate*100,1)]}
 
+    def _ai_year(year_key):
+        """Pull AI values if available and valid; else None."""
+        if not ai_fwd or "years" not in ai_fwd:
+            return None
+        y = ai_fwd["years"].get(year_key)
+        if not isinstance(y, dict):
+            return None
+        try:
+            return [round(y["growth"]*100, 1), round(y["margin"]*100, 1),
+                    round(y["capex"]*100, 1), round(y["da"]*100, 1),
+                    round(y["sbc"]*100, 1), round(y["tax"]*100, 1)]
+        except (KeyError, TypeError, ValueError):
+            return None
+
     rev = model.base_revenue
     for i, col in enumerate(year_cols):
-        if col == "Terminal":
+        ai_vals = _ai_year(col)
+        if ai_vals is not None:
+            defaults[col] = ai_vals
+        elif col == "Terminal":
             defaults[col] = [round(tg*100,1), round(mid_margin*100,1), round(model.capex_pct*100,1), round(model.da_pct*100,1), round(model.sbc_pct*100,1), round(model.tax_rate*100,1)]
         else:
             # Growth: start at implied, gradually fade toward terminal
@@ -626,8 +686,10 @@ def _build_bridge(cur_ev, ev_from_rev, ev_from_m, ev_res, tot_ev, C_TEAL, C_GREE
     return fig
 
 
-def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
-    """Generate full multi-page PDF report covering all 5 tabs."""
+def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None):
+    """Generate full multi-page PDF report covering all 5 tabs.
+    If ai_summary dict is provided (from senior_commentary), prepend a Valterna-styled
+    Executive Summary as Page 1."""
     from io import BytesIO
     from datetime import datetime
     from reportlab.lib.pagesizes import A4
@@ -637,33 +699,271 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
     from reportlab.lib.enums import TA_LEFT, TA_CENTER
     from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
         TableStyle, Image as RLImage, PageBreak, KeepTogether)
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    import os
 
-    C_TEAL, C_CORAL, C_AMBER, C_GREEN, C_RED = "#003850", "#F26B43", "#FBAE40", "#2ECC71", "#E74C3C"
+    # ── Valterna Corporate Design ────────────────────────────────────────────
+    # Primary palette
+    C_NAVY     = "#003850"   # Dark Teal — Primary
+    C_GOLD     = "#BD9755"   # Muted Gold — Primary Accent
+    C_AMBER    = "#FBAE40"   # Bright Amber — Secondary Accent
+    C_CORAL    = "#F26B43"   # Coral — Tertiary
+    C_GREEN    = "#2ECC71"
+    C_RED      = "#E74C3C"
+    C_BG_LIGHT = "#F0F3F5"   # Light background
+    C_BG_TEAL  = "#E8F0F3"   # Tinted background for highlights
+    C_BORDER   = "#D0D5DB"
+    C_GRAY_DARK = "#4A5568"
+    C_GRAY_MID  = "#A0A8B0"
+
+    # Backwards-compat aliases (rest of code uses these names)
+    C_TEAL = C_NAVY
+
+    # ── Font registration: try Century Gothic, fallback Helvetica ────────────
+    FONT_REG = "Helvetica"
+    FONT_BOLD = "Helvetica-Bold"
+    cg_paths = [
+        # Common Windows paths
+        "C:/Windows/Fonts/GOTHIC.TTF",
+        "C:/Windows/Fonts/GOTHICB.TTF",
+        # macOS
+        "/Library/Fonts/Century Gothic.ttf",
+        # Linux/Streamlit Cloud — try local fonts dir
+        "fonts/CenturyGothic.ttf",
+        "fonts/CenturyGothicBold.ttf",
+    ]
+    try:
+        for p_reg, p_bold in [(cg_paths[0], cg_paths[1]),
+                              (cg_paths[2], cg_paths[2]),
+                              (cg_paths[4], cg_paths[5])]:
+            if os.path.exists(p_reg):
+                pdfmetrics.registerFont(TTFont("CenturyGothic", p_reg))
+                if os.path.exists(p_bold):
+                    pdfmetrics.registerFont(TTFont("CenturyGothic-Bold", p_bold))
+                    FONT_REG = "CenturyGothic"
+                    FONT_BOLD = "CenturyGothic-Bold"
+                else:
+                    FONT_REG = "CenturyGothic"
+                    FONT_BOLD = "CenturyGothic"
+                break
+    except Exception:
+        pass  # silent fallback to Helvetica
 
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4,
         leftMargin=1.6*cm, rightMargin=1.6*cm,
         topMargin=1.4*cm, bottomMargin=1.4*cm,
         title=f"CORE DCF Report – {r['ticker']}",
-        author="CORE DCF Engine")
+        author="Valterna AG")
 
     styles = getSampleStyleSheet()
-    h1 = ParagraphStyle("H1", parent=styles["Heading1"], fontName="Helvetica-Bold",
-        fontSize=18, textColor=colors.HexColor(C_TEAL), spaceAfter=8, spaceBefore=4)
-    h2 = ParagraphStyle("H2", parent=styles["Heading2"], fontName="Helvetica-Bold",
-        fontSize=13, textColor=colors.HexColor(C_TEAL), spaceAfter=6, spaceBefore=10)
-    h3 = ParagraphStyle("H3", parent=styles["Heading3"], fontName="Helvetica-Bold",
-        fontSize=11, textColor=colors.HexColor(C_TEAL), spaceAfter=4, spaceBefore=6)
-    body = ParagraphStyle("body", parent=styles["BodyText"], fontName="Helvetica",
-        fontSize=9.5, leading=12, spaceAfter=3)
-    small = ParagraphStyle("small", parent=styles["BodyText"], fontName="Helvetica",
+    h1 = ParagraphStyle("H1", parent=styles["Heading1"], fontName=FONT_BOLD,
+        fontSize=18, textColor=colors.HexColor(C_NAVY), spaceAfter=8, spaceBefore=4, leading=22)
+    h2 = ParagraphStyle("H2", parent=styles["Heading2"], fontName=FONT_BOLD,
+        fontSize=13, textColor=colors.HexColor(C_NAVY), spaceAfter=6, spaceBefore=10, leading=16)
+    h3 = ParagraphStyle("H3", parent=styles["Heading3"], fontName=FONT_BOLD,
+        fontSize=11, textColor=colors.HexColor(C_NAVY), spaceAfter=4, spaceBefore=6, leading=14)
+    body = ParagraphStyle("body", parent=styles["BodyText"], fontName=FONT_REG,
+        fontSize=9.5, leading=13, spaceAfter=3, textColor=colors.HexColor(C_GRAY_DARK))
+    small = ParagraphStyle("small", parent=styles["BodyText"], fontName=FONT_REG,
         fontSize=8, leading=10, textColor=colors.HexColor("#666666"))
     # Verdict: smaller (14pt) so it doesn't overlap KPI strip; left-aligned in its own paragraph
-    verdict_style = lambda c: ParagraphStyle("v", fontName="Helvetica-Bold",
+    verdict_style = lambda c: ParagraphStyle("v", fontName=FONT_BOLD,
         fontSize=14, textColor=colors.HexColor(c), spaceAfter=4, spaceBefore=2,
         alignment=TA_LEFT, leading=17)
 
     story = []
+
+    # ══ PAGE 0: VALTERNA EXECUTIVE SUMMARY (only if AI summary provided) ═════
+    if ai_summary:
+        # Valterna brand strip at top
+        from datetime import datetime as _dt
+        brand_strip = Table(
+            [[Paragraph(f"<font color='{C_NAVY}'><b>VALTERNA AG</b></font>  "
+                       f"<font color='{C_GOLD}'>·  Investment Committee Memo</font>",
+                       ParagraphStyle("brand", fontName=FONT_BOLD, fontSize=10,
+                                      textColor=colors.HexColor(C_NAVY))),
+              Paragraph(f"<font color='{C_GRAY_MID}'>{_dt.now():%d %B %Y}</font>",
+                       ParagraphStyle("date", fontName=FONT_REG, fontSize=9,
+                                      textColor=colors.HexColor(C_GRAY_MID),
+                                      alignment=2))]],  # right-aligned
+            colWidths=[12.0*cm, 6.0*cm])
+        brand_strip.setStyle(TableStyle([
+            ("LINEBELOW", (0, 0), (-1, 0), 1.2, colors.HexColor(C_GOLD)),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        story.append(brand_strip)
+        story.append(Spacer(1, 0.5*cm))
+
+        # Ticker title block
+        title_para = ParagraphStyle("title_p", fontName=FONT_BOLD,
+            fontSize=22, textColor=colors.HexColor(C_NAVY), leading=26, spaceAfter=2)
+        sub_para = ParagraphStyle("sub_p", fontName=FONT_REG,
+            fontSize=10, textColor=colors.HexColor(C_GRAY_MID), leading=12, spaceAfter=8)
+        story.append(Paragraph(f"{r['ticker']}  <font color='{C_GOLD}'>·</font>  "
+                              f"<font size='14'>{r['price']:.2f}</font>", title_para))
+        story.append(Paragraph(f"Reverse DCF Analyse  ·  WACC {wacc:.2%}  ·  Tg {tg:.2%}  ·  "
+                              f"Quality {r['quality'].grade}",
+                              sub_para))
+        story.append(Spacer(1, 0.3*cm))
+
+        # Headline — gold accent box
+        headline = ai_summary.get("headline", "")
+        if headline:
+            headline_style = ParagraphStyle("headline", fontName=FONT_BOLD,
+                fontSize=12, textColor=colors.HexColor(C_NAVY), leading=16,
+                leftIndent=0, spaceAfter=8)
+            headline_table = Table([[Paragraph(headline, headline_style)]],
+                colWidths=[18.0*cm])
+            headline_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(C_BG_TEAL)),
+                ("LINEBEFORE", (0, 0), (0, -1), 3, colors.HexColor(C_GOLD)),
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                ("TOPPADDING", (0, 0), (-1, -1), 10),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+            ]))
+            story.append(headline_table)
+            story.append(Spacer(1, 0.4*cm))
+
+        # Investment Thesis
+        thesis = ai_summary.get("thesis", "")
+        if thesis:
+            story.append(Paragraph("INVESTMENT THESIS", h3))
+            story.append(Paragraph(thesis, body))
+            story.append(Spacer(1, 0.3*cm))
+
+        # Three cases (Bull / Base / Bear) as side-by-side table
+        bull = ai_summary.get("bull_case", "")
+        base = ai_summary.get("base_case", "")
+        bear = ai_summary.get("bear_case", "")
+        if bull or base or bear:
+            case_label = ParagraphStyle("case_label", fontName=FONT_BOLD,
+                fontSize=9, textColor=colors.white, leading=11, alignment=TA_CENTER)
+            case_body = ParagraphStyle("case_body", fontName=FONT_REG,
+                fontSize=9, textColor=colors.HexColor(C_GRAY_DARK), leading=12)
+
+            cases_tbl = Table([
+                [Paragraph("BULL CASE", case_label),
+                 Paragraph("BASE CASE", case_label),
+                 Paragraph("BEAR CASE", case_label)],
+                [Paragraph(bull, case_body),
+                 Paragraph(base, case_body),
+                 Paragraph(bear, case_body)]
+            ], colWidths=[6.0*cm, 6.0*cm, 6.0*cm])
+            cases_tbl.setStyle(TableStyle([
+                # Header row colors
+                ("BACKGROUND", (0, 0), (0, 0), colors.HexColor(C_GREEN)),
+                ("BACKGROUND", (1, 0), (1, 0), colors.HexColor(C_NAVY)),
+                ("BACKGROUND", (2, 0), (2, 0), colors.HexColor(C_RED)),
+                # Body row
+                ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor(C_BG_LIGHT)),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, 0), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
+                ("TOPPADDING", (0, 1), (-1, 1), 8),
+                ("BOTTOMPADDING", (0, 1), (-1, 1), 10),
+            ]))
+            story.append(cases_tbl)
+            story.append(Spacer(1, 0.4*cm))
+
+        # Verdict — large gold-accented block
+        action = ai_summary.get("verdict_action", "")
+        entry = ai_summary.get("verdict_entry_level", None)
+        rationale = ai_summary.get("verdict_rationale", "")
+        if action:
+            action_color_map = {
+                "LONG": C_GREEN, "ACCUMULATE": C_GREEN,
+                "HOLD": C_AMBER,
+                "TRIM": C_CORAL, "AVOID": C_RED,
+            }
+            action_color = action_color_map.get(action.upper(), C_NAVY)
+
+            action_style = ParagraphStyle("action", fontName=FONT_BOLD, fontSize=18,
+                textColor=colors.HexColor(action_color), leading=22)
+            entry_style = ParagraphStyle("entry", fontName=FONT_REG, fontSize=10,
+                textColor=colors.HexColor("#FFFFFF"), leading=13)
+            rationale_style = ParagraphStyle("rat", fontName=FONT_REG, fontSize=9.5,
+                textColor=colors.HexColor("#E8F0F3"), leading=13)
+
+            entry_str = ""
+            if entry is not None:
+                try:
+                    entry_str = f"Entry Target: <b>{float(entry):.2f}</b>"
+                    if r.get("price"):
+                        diff = float(entry)/r["price"] - 1
+                        entry_str += f"  ({diff:+.0%} vs current)"
+                except (TypeError, ValueError):
+                    pass
+
+            verdict_box_content = [
+                [Paragraph(f"VERDICT", ParagraphStyle("vlabel", fontName=FONT_BOLD,
+                    fontSize=8, textColor=colors.HexColor(C_GOLD), leading=10))],
+                [Paragraph(action.upper(), action_style)],
+                [Paragraph(entry_str, entry_style)] if entry_str else [Spacer(1, 1)],
+                [Paragraph(rationale, rationale_style)] if rationale else [Spacer(1, 1)],
+            ]
+            verdict_tbl = Table(verdict_box_content, colWidths=[18.0*cm])
+            verdict_tbl.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(C_NAVY)),
+                ("TEXTCOLOR", (0, 0), (-1, -1), colors.white),
+                ("LEFTPADDING", (0, 0), (-1, -1), 14),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+                ("TOPPADDING", (0, 0), (0, 0), 10),
+                ("BOTTOMPADDING", (0, 0), (0, 0), 2),
+                ("TOPPADDING", (0, 1), (-1, 1), 0),
+                ("BOTTOMPADDING", (0, 1), (-1, 1), 4),
+                ("TOPPADDING", (0, 2), (-1, 2), 0),
+                ("BOTTOMPADDING", (0, 2), (-1, 2), 6),
+                ("TOPPADDING", (0, 3), (-1, 3), 0),
+                ("BOTTOMPADDING", (0, 3), (-1, 3), 12),
+            ]))
+            story.append(verdict_tbl)
+            story.append(Spacer(1, 0.4*cm))
+
+        # Catalysts & Risks side-by-side
+        catalysts = ai_summary.get("catalysts", []) or []
+        risks = ai_summary.get("risks", []) or []
+        if catalysts or risks:
+            cat_label = ParagraphStyle("cat_label", fontName=FONT_BOLD,
+                fontSize=10, textColor=colors.HexColor(C_NAVY), leading=12, spaceAfter=6)
+            cat_item = ParagraphStyle("cat_item", fontName=FONT_REG,
+                fontSize=9, textColor=colors.HexColor(C_GRAY_DARK), leading=12,
+                leftIndent=10, bulletIndent=2, spaceAfter=2)
+
+            cat_para = [Paragraph("CATALYSTS", cat_label)]
+            for c in catalysts[:5]:
+                cat_para.append(Paragraph(f"<font color='{C_GREEN}'>●</font>  {c}", cat_item))
+            risk_para = [Paragraph("RISKS", cat_label)]
+            for rk in risks[:5]:
+                risk_para.append(Paragraph(f"<font color='{C_CORAL}'>●</font>  {rk}", cat_item))
+
+            cr_tbl = Table([[cat_para, risk_para]], colWidths=[9.0*cm, 9.0*cm])
+            cr_tbl.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (0, 0), 0),
+                ("RIGHTPADDING", (0, 0), (0, 0), 8),
+                ("LEFTPADDING", (1, 0), (1, 0), 8),
+                ("RIGHTPADDING", (1, 0), (1, 0), 0),
+            ]))
+            story.append(cr_tbl)
+
+        # Footer note for the executive summary page
+        story.append(Spacer(1, 0.6*cm))
+        footer_style = ParagraphStyle("foot", fontName=FONT_REG, fontSize=7.5,
+            textColor=colors.HexColor(C_GRAY_MID), leading=10, alignment=TA_LEFT)
+        story.append(Paragraph(
+            "AI-generierte Einordnung basierend auf CORE DCF Engine Output. "
+            "Quantitative Details auf den folgenden Seiten. Nicht als Anlageberatung zu verstehen.",
+            footer_style))
+
+        story.append(PageBreak())
 
     # ══ PAGE 1: COVER + REVERSE DCF VERDICT ══════════════════════════════════
     story.append(Paragraph(f"CORE DCF Report: {r['ticker']}", h1))
@@ -1287,10 +1587,58 @@ if st.sidebar.button("Generate PDF", use_container_width=True):
         st.sidebar.warning("Open the Forward DCF tab once to initialize assumptions, "
             "then re-click.")
     else:
+        ai_summary = None
+        # Generate Senior Commentary if toggle is on
+        if ai_commentary and ai_available:
+            cache_key_cmt = f"ai_cmt_{r['ticker']}_{round(wacc,4)}_{round(tg,4)}"
+            if cache_key_cmt not in st.session_state:
+                with st.spinner("AI: Crafting Investment Committee memo..."):
+                    from ai_layer import senior_commentary
+                    # Compute current Forward DCF result for context
+                    fwd_result = None
+                    try:
+                        pv_e_tmp = 0.0; rev_tmp = model.base_revenue
+                        for i in range(n_fwd):
+                            colY = f"Y{i+1}"
+                            g_=float(edited_df.loc["Revenue Growth (%)",colY])/100
+                            m_=float(edited_df.loc["EBIT Margin (%)",colY])/100
+                            cx_=float(edited_df.loc["CapEx/Rev (%)",colY])/100
+                            da_=float(edited_df.loc["D&A/Rev (%)",colY])/100
+                            sbc_=float(edited_df.loc["SBC/Rev (%)",colY])/100
+                            tx_=float(edited_df.loc["Tax Rate (%)",colY])/100
+                            rev_tmp*=(1+g_); ebit_=rev_tmp*m_; nopat_=ebit_*(1-tx_)
+                            fcff_=nopat_+rev_tmp*da_-rev_tmp*cx_-rev_tmp*sbc_
+                            pv_e_tmp+=fcff_/(1+wacc)**(i+1)
+                        tg_f_=float(edited_df.loc["Revenue Growth (%)","Terminal"])/100
+                        tm_f_=float(edited_df.loc["EBIT Margin (%)","Terminal"])/100
+                        cx_f_=float(edited_df.loc["CapEx/Rev (%)","Terminal"])/100
+                        da_f_=float(edited_df.loc["D&A/Rev (%)","Terminal"])/100
+                        sbc_f_=float(edited_df.loc["SBC/Rev (%)","Terminal"])/100
+                        tx_f_=float(edited_df.loc["Tax Rate (%)","Terminal"])/100
+                        t_rev_=rev_tmp*(1+tg_f_); t_nopat_=t_rev_*tm_f_*(1-tx_f_)
+                        t_fcff_=t_nopat_+t_rev_*da_f_-t_rev_*cx_f_-t_rev_*sbc_f_
+                        if wacc > tg_f_:
+                            tv_v_=t_fcff_/(wacc-tg_f_); pv_tv_=tv_v_/(1+wacc)**n_fwd
+                            tot_ev_=pv_e_tmp+pv_tv_
+                            fair_eq_=tot_ev_-model.net_debt-model.minority
+                            fp_=fair_eq_/model.shares if model.shares else 0
+                            up_=fp_/model.price-1 if model.price else 0
+                            fwd_result = {"fair_price": fp_, "upside": up_,
+                                "verdict": ("UNDERVALUED" if up_>0.20 else "FAIRLY VALUED"
+                                    if abs(up_)<0.05 else "OVERVALUED" if up_<-0.20 else "MIXED")}
+                    except Exception:
+                        pass
+                    st.session_state[cache_key_cmt] = senior_commentary(
+                        api_key, model, r, forward_dcf_results=fwd_result)
+            ai_summary = st.session_state.get(cache_key_cmt)
+
         with st.spinner("Building PDF..."):
             try:
-                pdf_bytes = build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd)
-                st.sidebar.success(f"✓ {len(pdf_bytes)/1024:.0f} KB")
+                pdf_bytes = build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd,
+                                     ai_summary=ai_summary)
+                kb = len(pdf_bytes)/1024
+                ai_tag = " [AI]" if ai_summary else ""
+                st.sidebar.success(f"✓ {kb:.0f} KB{ai_tag}")
                 st.sidebar.download_button(
                     "⬇ Download PDF",
                     data=pdf_bytes,
