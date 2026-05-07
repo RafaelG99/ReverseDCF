@@ -138,10 +138,12 @@ def _extract_json(text: str) -> Optional[dict]:
 
 def _call_claude(api_key: str, system: str, user_message: str,
                  max_tokens: int = 1500) -> Optional[dict]:
-    """Make a Claude API call with prompt caching, return parsed JSON or None on failure."""
+    """Make a Claude API call with prompt caching, return parsed JSON or raise on failure."""
     if not api_key:
         return None
     client = Anthropic(api_key=api_key)
+    last_error = None
+    last_text = None
     for attempt in range(MAX_RETRIES + 1):
         try:
             response = client.messages.create(
@@ -151,25 +153,29 @@ def _call_claude(api_key: str, system: str, user_message: str,
                 system=[{
                     "type": "text",
                     "text": system,
-                    "cache_control": {"type": "ephemeral"},  # 5min cache
+                    "cache_control": {"type": "ephemeral"},
                 }],
                 messages=[{"role": "user", "content": user_message}],
             )
             text = "".join(b.text for b in response.content if hasattr(b, "text"))
+            last_text = text
             parsed = _extract_json(text)
             if parsed is not None:
                 return parsed
-            # If parse failed and we have retries left, ask Claude to fix
-            if attempt < MAX_RETRIES:
-                continue
         except APIError as e:
+            last_error = e
             if attempt < MAX_RETRIES:
                 continue
-            print(f"AI Layer error: {e}")
-            return None
         except Exception as e:
-            print(f"AI Layer unexpected error: {e}")
-            return None
+            last_error = e
+            if attempt < MAX_RETRIES:
+                continue
+    # All retries exhausted — raise so caller sees the actual problem
+    if last_error is not None:
+        raise RuntimeError(f"Claude API failed after {MAX_RETRIES+1} attempts: "
+                           f"{type(last_error).__name__}: {str(last_error)[:300]}")
+    if last_text is not None:
+        raise RuntimeError(f"Claude returned non-JSON response: {last_text[:300]}")
     return None
 
 
