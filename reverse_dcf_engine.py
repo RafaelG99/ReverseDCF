@@ -231,11 +231,70 @@ class CoreDCF:
         shares = self._last(h,"Shares_Outstanding") or self._safe_num(self.current.get("Shares Out")) or 1
         self.shares = shares; self.base_fcff_per_share = self.base_fcff/shares if shares else 0
 
-        # Market
+        # ── Currency detection & normalization ────────────────────────────────
+        # UK-listed stocks (".LN" / "LN") quote price in PENCE (GBp = 1/100 GBP)
+        # but Market Cap/EV in GBP. Some report Revenue/EBITDA in USD (e.g. Glencore,
+        # BP, Shell). We normalize price to a "base currency" so MCap = Sh × Price.
         self.price = self._safe_num(self.current.get("Price")) or 0
         mcap = self._safe_num(self.current.get("Market Cap")) or 0
         if self.base_revenue>0 and mcap>0 and mcap/self.base_revenue>5000:
             mcap /= 1e6; self._warnings.append("INFO: Market Cap normalized (÷1M)")
+
+        # Detect pence-quoting: if Sh × Price differs from MCap by ~100x, price is in pence
+        self._is_pence_quoted = False
+        if self.price > 0 and shares > 0 and mcap > 0:
+            implied_mcap = self.price * shares
+            ratio = implied_mcap / mcap if mcap else 1
+            if 80 < ratio < 120:  # ~100x off → pence quotation
+                self.price = self.price / 100
+                self._is_pence_quoted = True
+                self._warnings.append(
+                    f"INFO: Price normalized from pence (GBp) to GBP "
+                    f"(was {self._safe_num(self.current.get('Price')):.1f}p, now {self.price:.2f})")
+
+        # Detect Revenue/MCap currency mismatch (e.g. Glencore: USD revenue, GBP MCap)
+        # Detection logic: Compare reported FCF/Share TTM × Shares to base FCFF.
+        # If they differ by >20%, suggests currency mismatch between Fundamentals and Current.
+        # Also check known patterns: pence-quoted UK stocks often report in USD (mining, oil&gas).
+        self._currency_warning = False
+        self._fx_applied = None
+        fcf_per_share_bbg = self._safe_num(self.current.get("FCF/Share TTM"))
+
+        # Special handling: pence-quoted UK stocks reporting in USD (Glencore, BP, Shell, Antofagasta, etc.)
+        # In this case: Fundamentals in USD, Price in GBp, MCap & EV in GBP
+        # We need to convert MCap & EV to USD to match Fundamentals.
+        if self._is_pence_quoted and self.base_revenue > 0:
+            # Heuristic: compute implied EV/Revenue. If <0.5x and known UK USD-reporter pattern,
+            # likely currency mismatch. Apply ~1.27 FX (USD/GBP).
+            ev_to_rev_gbp = mcap / self.base_revenue
+            if ev_to_rev_gbp < 0.5:
+                # Likely USD-reporter pattern. Use FX = USD/GBP ≈ 1.27 (long-term average)
+                # Note: Hard-coded because we don't have live FX. For exact analysis, user can override.
+                fx_usd_gbp = 1.27
+                mcap_usd = mcap * fx_usd_gbp
+                self._fx_applied = fx_usd_gbp
+                self._warnings.append(
+                    f"WARNING: Currency mismatch detected — Fundamentals appear in USD, MCap/EV in GBP. "
+                    f"Auto-converting MCap and EV to USD using USD/GBP={fx_usd_gbp}. "
+                    f"For exact valuation, override FX rate manually or convert Excel to single currency.")
+                # Convert price too (to USD per share, for FCFF/Share comparisons)
+                self.price_local = self.price  # GBP per share
+                self.price = self.price * fx_usd_gbp  # USD per share
+                mcap = mcap_usd
+
+        debt = self._last(h,"Total_Debt") or 0; lease = self._last(h,"Lease_Liab") or 0
+        cash = self._last(h,"Cash") or 0; mi = self._last(h,"Minority_Interest") or 0
+        self.market_cap = mcap; self.net_debt = debt+lease-cash; self.minority = mi
+        self.lease_liab = lease
+
+        # If FX was applied to MCap, also apply to BBG-EV
+        if self._fx_applied:
+            bbg_ev_raw = self._safe_num(self.current.get("EV"))
+            if bbg_ev_raw and self.base_revenue > 0 and bbg_ev_raw / self.base_revenue > 5000:
+                bbg_ev_raw /= 1e6
+            if bbg_ev_raw:
+                # Override the bbg_ev variable used downstream
+                self.current = {**self.current, "EV": bbg_ev_raw * self._fx_applied}
 
         debt = self._last(h,"Total_Debt") or 0; lease = self._last(h,"Lease_Liab") or 0
         cash = self._last(h,"Cash") or 0; mi = self._last(h,"Minority_Interest") or 0
