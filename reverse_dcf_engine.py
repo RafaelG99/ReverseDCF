@@ -430,26 +430,33 @@ class CoreDCF:
             d=self._last(h,"Total_Debt") or 0; e=self._last(h,"EBITDA") or 1
             qp.debt_ebitda=d/e if e else 0
         qp.c_score = self.compute_c_score()
-        # Quality scoring: positive factors capped, C-Score subtractor capped at -3
-        # to prevent a single overactive signal from dominating.
+        # Quality scoring (refined v2):
+        # - ROIC: blend median + current to capture structural improvement
+        # - Margin Stability: looser threshold for industrials (5% instead of 3%)
+        # - C-Score: stronger bonus for clean 0/5 (+2 instead of +1)
         sc = 0
-        # ROIC: tiered bonus
-        if qp.roic_median > 0.20: sc += 3   # exceptional
-        elif qp.roic_median > 0.15: sc += 2
-        elif qp.roic_median > 0.10: sc += 1
-        # Stability
-        if qp.margin_stability < 0.03: sc += 1
+        # ROIC: use max of median (long-term) and current (latest) — captures structural improvement
+        # e.g. ABB: median 13.2% (drag from pre-divestment years) but current 21% — credit current
+        roic_effective = max(qp.roic_median, self.current_roic) if self.current_roic else qp.roic_median
+        if roic_effective > 0.20: sc += 3   # exceptional
+        elif roic_effective > 0.15: sc += 2
+        elif roic_effective > 0.10: sc += 1
+        # Margin Stability: tiered, looser for typical industrials
+        if qp.margin_stability < 0.025: sc += 2     # exceptional (Healthcare/Software-tier)
+        elif qp.margin_stability < 0.05: sc += 1    # solid (typical for high-quality industrials)
         # FCF conversion
-        if qp.fcf_conversion > 1.0: sc += 1
+        if qp.fcf_conversion > 1.1: sc += 2
+        elif qp.fcf_conversion > 0.9: sc += 1
         # Leverage: tiered
         if qp.debt_ebitda < 1.5: sc += 2     # very strong
         elif qp.debt_ebitda < 2.5: sc += 1   # acceptable
-        # Clean C-Score bonus
-        if qp.c_score.total <= 1: sc += 1
+        # C-Score: strong bonus for clean profile
+        if qp.c_score.total == 0: sc += 2    # perfect — earnings quality is pristine
+        elif qp.c_score.total <= 1: sc += 1
         # Subtract C-Score, capped at -3 (prevents single signal from killing grade)
         sc -= min(qp.c_score.total, 3)
-        # Grade thresholds: A ≥6, B ≥4, C ≥2, D <2
-        qp.grade = "A" if sc >= 6 else "B" if sc >= 4 else "C" if sc >= 2 else "D"
+        # Grade thresholds: A ≥7, B ≥5, C ≥2, D <2
+        qp.grade = "A" if sc >= 7 else "B" if sc >= 5 else "C" if sc >= 2 else "D"
         return qp
 
     # ══ HISTORICAL MULTIPLES ══════════════════════════════════════════════════
