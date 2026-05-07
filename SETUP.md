@@ -1,4 +1,4 @@
-# CORE DCF Engine — Setup Notes
+# CORE DCF Engine — Setup Notes (final)
 
 ## Streamlit Cloud Deployment
 
@@ -9,57 +9,78 @@ your-repo/
 ├── reverse_dcf_engine.py
 ├── ai_layer.py
 ├── requirements.txt
-├── fonts/                         # OPTIONAL: Century Gothic for full Valterna branding
-│   ├── CenturyGothic.ttf
-│   └── CenturyGothicBold.ttf
+├── valterna_logo.png              # ← Logo file (next to app.py)
 └── .streamlit/
-    └── secrets.toml               # NEVER commit this file
+    └── secrets.toml               # NEVER commit this
 ```
+
+The PDF builder auto-discovers the logo. It searches in this order:
+1. `valterna_logo.png` (next to `app.py`)
+2. `logo.png`
+3. `assets/valterna_logo.png`
+
+If none of these exist, the PDF still renders — just without the logo (Valterna brand strip falls back to text-only). The app does not crash.
 
 ### 2. Secrets Setup
 
 In Streamlit Cloud:
-1. Go to your app settings: https://share.streamlit.io
-2. Click "Settings" → "Secrets"
-3. Add this content:
+1. App settings → Secrets
+2. Paste:
 
 ```toml
 ANTHROPIC_API_KEY = "sk-ant-api03-..."
 ```
 
-For local development: create `.streamlit/secrets.toml` in your project root with the same content.
+For local dev: create `.streamlit/secrets.toml` with the same content.
 
-### 3. Century Gothic (optional, for branding)
+### 3. AI Layer Toggles (Sidebar)
 
-If you want Century Gothic fonts (Valterna corporate font), upload TTF files to a `fonts/` directory in your repo. The PDF generator auto-detects them. Without them, it falls back to Helvetica (clean fallback, still uses Valterna colors).
+Three toggles after upload:
+- **Smart WACC/Tg Defaults** — Bottom-up plausibilization. Shows AI suggestion next to WACC slider.
+- **Smart Forward DCF Pre-Fill** — Sector-aware Y1-Y10 trajectory.
+- **AI Investment Commentary in PDF** — 1-page Executive Summary as Page 1.
 
-You can extract Century Gothic from a Windows machine at `C:/Windows/Fonts/GOTHIC.TTF` and `GOTHICB.TTF`. Note: Microsoft licensing applies — only use on private/internal projects.
+All toggles disable gracefully if no API key is found. The app remains fully functional without AI — just without the smart augmentation.
 
-### 4. AI Layer Toggles (Sidebar)
+### 4. Cost per Run (Opus 4.7)
 
-After upload, three toggles appear in the sidebar:
-- **Smart WACC/Tg Defaults**: Bottom-up plausibilization. Shows AI suggestion next to the WACC slider.
-- **Smart Forward DCF Pre-Fill**: Sector-aware Y1-Y10 trajectory in Forward DCF tab.
-- **AI Investment Commentary in PDF**: Adds a 1-page Executive Summary as the new Page 1 of the PDF.
-
-All toggles are **disabled gracefully** if no API key is found.
-
-### 5. Cost per Run (Opus 4.7)
-
-Approximate cost when all 3 layers are active:
-- **~$0.10/run** (with Opus 4.7's tokenizer overhead)
-- **~$0.06/run** with prompt caching after the first run
+With all 3 layers active: **~$0.10/run**, **~$0.06/run** with prompt caching after the first run.
 
 At 30 runs/month: **$1.80–4.20/month**.
 
-### 6. Caching Strategy
+### 5. Caching
 
-Each AI call is cached in `st.session_state` per ticker + parameters. Re-running the same ticker with the same WACC/Tg does **not** re-call the API. Changing WACC/Tg invalidates the Forward DCF and Commentary caches but reuses the WACC/Tg suggestion (since that's input-independent for same ticker).
+Each AI call cached in `st.session_state` per ticker + parameters. Re-running same ticker doesn't re-call the API. Changing WACC/Tg invalidates Forward DCF cache and Commentary cache, but reuses the WACC/Tg suggestion.
 
-### 7. Optional Excel Fields
+### 6. Optional Excel Fields (Current sheet)
 
-In `Current` sheet, you can add these new optional fields:
-- `Clean Margin` — Manual override for Mid-Cycle Margin (decimal or percentage)
-- `Major MA Year` — Year of major M&A (skips Asset Growth check in C-Score)
+Add these to your Excel template's `Current` sheet for tighter analysis:
+- `Clean Margin` — manual override for Mid-Cycle Margin (decimal or percentage)
+- `Major MA Year` — year of major M&A (skips Asset Growth check in C-Score)
 
-Leave them blank to use engine defaults.
+Leave blank to use engine defaults.
+
+### 7. Output: PDF Structure
+
+The generated PDF has:
+- **Page 1**: Valterna Investment Committee Memo (only if AI Commentary toggle is ON)
+  - Headline + Investment Thesis
+  - Bull / Base / Bear cases (color-coded)
+  - Verdict box (LONG/ACCUMULATE/HOLD/TRIM/AVOID with entry level)
+  - Catalysts & Risks bullets
+- **Page 2**: Reverse DCF Cover (verdict, KPI strip, scenario fan, TV decomposition)
+- **Page 3**: Plausibility checks, Model Inputs, Sensitivity grid
+- **Page 4–5**: Quality Grade, C-Score, Historical Multiples
+- **Page 5–6**: Return Decomposition (waterfall + components)
+- **Page 6–7**: Peer Comparison
+- **Page 7–8**: Forward DCF (My View vs Market, Cash Flows, Valuation Bridge, Implied Multiples)
+
+Every page has Valterna logo top-left, ticker + date top-right, gold separator, "Valterna AG · CORE DCF Engine · Confidential" + Page Number footer.
+
+### 8. Quick deploy checklist
+
+- [ ] `valterna_logo.png` next to `app.py`
+- [ ] `requirements.txt` includes `anthropic>=0.40`, `matplotlib>=3.7`, `kaleido==0.2.1`
+- [ ] `ANTHROPIC_API_KEY` in Streamlit Cloud Secrets
+- [ ] Streamlit Cloud reboot triggered after push
+- [ ] Test: upload ABB Excel → 3 toggles visible & enabled → click Generate PDF → 8-page report with Valterna branding
