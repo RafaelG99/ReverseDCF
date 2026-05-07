@@ -253,49 +253,34 @@ class CoreDCF:
                     f"(was {self._safe_num(self.current.get('Price')):.1f}p, now {self.price:.2f})")
 
         # Detect Revenue/MCap currency mismatch (e.g. Glencore: USD revenue, GBP MCap)
-        # Detection logic: Compare reported FCF/Share TTM × Shares to base FCFF.
-        # If they differ by >20%, suggests currency mismatch between Fundamentals and Current.
-        # Also check known patterns: pence-quoted UK stocks often report in USD (mining, oil&gas).
+        # We do NOT auto-FX-convert anymore — instead we warn loudly and offer
+        # manual override via Excel field "FX Rate" in Current sheet.
         self._currency_warning = False
         self._fx_applied = None
         fcf_per_share_bbg = self._safe_num(self.current.get("FCF/Share TTM"))
 
-        # Special handling: pence-quoted UK stocks reporting in USD (Glencore, BP, Shell, Antofagasta, etc.)
-        # In this case: Fundamentals in USD, Price in GBp, MCap & EV in GBP
-        # We need to convert MCap & EV to USD to match Fundamentals.
-        if self._is_pence_quoted and self.base_revenue > 0:
-            # Heuristic: compute implied EV/Revenue. If <0.5x and known UK USD-reporter pattern,
-            # likely currency mismatch. Apply ~1.27 FX (USD/GBP).
+        # Optional: user can specify an FX rate in Current sheet to convert MCap/EV
+        # to fundamentals currency (e.g. for Glencore: FX Rate = 1.27 to convert GBP→USD)
+        fx_rate = self._safe_num(self.current.get("FX Rate"))
+
+        if fx_rate and 0.1 < fx_rate < 10:
+            # User-specified FX → apply to MCap, EV, Price
+            mcap = mcap * fx_rate
+            self._fx_applied = fx_rate
+            self.price_local = self.price
+            self.price = self.price * fx_rate
+            self._warnings.append(
+                f"INFO: User-specified FX Rate {fx_rate} applied to Market Cap, EV, and Price.")
+        elif self._is_pence_quoted and self.base_revenue > 0:
+            # Auto-detection only as a warning, not auto-fix
             ev_to_rev_gbp = mcap / self.base_revenue
             if ev_to_rev_gbp < 0.5:
-                # Likely USD-reporter pattern. Use FX = USD/GBP ≈ 1.27 (long-term average)
-                # Note: Hard-coded because we don't have live FX. For exact analysis, user can override.
-                fx_usd_gbp = 1.27
-                mcap_usd = mcap * fx_usd_gbp
-                self._fx_applied = fx_usd_gbp
                 self._warnings.append(
-                    f"WARNING: Currency mismatch detected — Fundamentals appear in USD, MCap/EV in GBP. "
-                    f"Auto-converting MCap and EV to USD using USD/GBP={fx_usd_gbp}. "
-                    f"For exact valuation, override FX rate manually or convert Excel to single currency.")
-                # Convert price too (to USD per share, for FCFF/Share comparisons)
-                self.price_local = self.price  # GBP per share
-                self.price = self.price * fx_usd_gbp  # USD per share
-                mcap = mcap_usd
-
-        debt = self._last(h,"Total_Debt") or 0; lease = self._last(h,"Lease_Liab") or 0
-        cash = self._last(h,"Cash") or 0; mi = self._last(h,"Minority_Interest") or 0
-        self.market_cap = mcap; self.net_debt = debt+lease-cash; self.minority = mi
-        self.lease_liab = lease
-
-        # If FX was applied to MCap, also apply to BBG-EV
-        if self._fx_applied:
-            bbg_ev_raw = self._safe_num(self.current.get("EV"))
-            if bbg_ev_raw and self.base_revenue > 0 and bbg_ev_raw / self.base_revenue > 5000:
-                bbg_ev_raw /= 1e6
-            if bbg_ev_raw:
-                # Override the bbg_ev variable used downstream
-                self.current = {**self.current, "EV": bbg_ev_raw * self._fx_applied}
-
+                    f"⚠ CURRENCY MISMATCH: This UK-listed stock likely reports Fundamentals "
+                    f"in USD, but MCap/EV are in GBP. EV/Revenue = {ev_to_rev_gbp:.2f}x is suspicious. "
+                    f"FIX: Add 'FX Rate' field in Current sheet (e.g. 1.27 for USD/GBP) "
+                    f"OR convert all Fundamentals to GBP. Current results NOT RELIABLE.")
+                self._currency_warning = True
         debt = self._last(h,"Total_Debt") or 0; lease = self._last(h,"Lease_Liab") or 0
         cash = self._last(h,"Cash") or 0; mi = self._last(h,"Minority_Interest") or 0
         self.market_cap = mcap; self.net_debt = debt+lease-cash; self.minority = mi
@@ -308,14 +293,16 @@ class CoreDCF:
         # Same scale-detection as MCap: BBG sometimes reports in absolute units
         if bbg_ev and self.base_revenue > 0 and bbg_ev / self.base_revenue > 5000:
             bbg_ev /= 1e6
+        # If FX was applied to MCap, also apply to BBG-EV
+        if self._fx_applied and bbg_ev:
+            bbg_ev = bbg_ev * self._fx_applied
         # Sanity: BBG-EV should be at least as big as MCap and within 30% of computed
         computed_ev = mcap + self.net_debt + mi
         if bbg_ev and bbg_ev > mcap * 0.9 and abs(bbg_ev/computed_ev - 1) < 0.30:
             self.market_ev = bbg_ev
-            # Implied "EV adjustments" beyond reported NetDebt+MI (pension, etc.)
             self._ev_source = "BBG"
             self._ev_adjustment = bbg_ev - computed_ev
-            if abs(self._ev_adjustment) > mcap * 0.01:  # >1% MCap = significant
+            if abs(self._ev_adjustment) > mcap * 0.01:
                 self._warnings.append(
                     f"INFO: BBG EV ({bbg_ev:,.0f}) used; differs from computed "
                     f"({computed_ev:,.0f}) by {self._ev_adjustment:+,.0f} "
