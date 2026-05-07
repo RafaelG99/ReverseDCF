@@ -647,13 +647,15 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
         fontSize=9.5, leading=12, spaceAfter=3)
     small = ParagraphStyle("small", parent=styles["BodyText"], fontName="Helvetica",
         fontSize=8, leading=10, textColor=colors.HexColor("#666666"))
+    # Verdict: smaller (14pt) so it doesn't overlap KPI strip; left-aligned in its own paragraph
     verdict_style = lambda c: ParagraphStyle("v", fontName="Helvetica-Bold",
-        fontSize=20, textColor=colors.HexColor(c), spaceAfter=4, alignment=TA_LEFT)
+        fontSize=14, textColor=colors.HexColor(c), spaceAfter=4, spaceBefore=2,
+        alignment=TA_LEFT, leading=17)
 
     story = []
 
     # ══ PAGE 1: COVER + REVERSE DCF VERDICT ══════════════════════════════════
-    story.append(Paragraph(f"CORE DCF Report — {r['ticker']}", h1))
+    story.append(Paragraph(f"CORE DCF Report: {r['ticker']}", h1))
     story.append(Paragraph(f"Generated {datetime.now():%d %b %Y, %H:%M} · "
         f"WACC {wacc:.2%} · Tg {tg:.2%} · Implied Period {proj_years}Y", small))
     story.append(Spacer(1, 0.3*cm))
@@ -766,7 +768,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
     story.append(chart_tbl)
     story.append(Paragraph(
         f"Expected Value = 25%×Bear + 50%×Base + 25%×Bull. Entry = Expected × 80%. "
-        f"{'⚠️ TV > 60% — sensitive to assumptions.' if tv_pct > 0.6 else '✓ Healthy TV split.'}",
+        f"{'TV > 60%, sensitive to assumptions.' if tv_pct > 0.6 else 'Healthy TV split.'}",
         small))
 
     story.append(PageBreak())
@@ -861,7 +863,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
     story.append(PageBreak())
 
     # ══ PAGE 3: QUALITY & MULTIPLES ═══════════════════════════════════════════
-    story.append(Paragraph(f"Quality & Multiples — {r['ticker']}", h1))
+    story.append(Paragraph(f"Quality &amp; Multiples: {r['ticker']}", h1))
     story.append(Spacer(1, 0.2*cm))
 
     # Quality + C-Score side-by-side
@@ -939,7 +941,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
     story.append(PageBreak())
 
     # ══ PAGE 4: RETURN DECOMPOSITION ══════════════════════════════════════════
-    story.append(Paragraph(f"Return Decomposition — {r['ticker']}", h1))
+    story.append(Paragraph(f"Return Decomposition: {r['ticker']}", h1))
     rd = r["return_decomposition"]
     if rd.get("available"):
         story.append(Paragraph(
@@ -980,15 +982,15 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
             story.append(Spacer(1, 0.2*cm))
             if multiple > 0.02:
                 story.append(Paragraph(
-                    f"<b>WARNING:</b> {multiple/total*100:.0f}% of return from multiple expansion — "
+                    f"<b>WARNING:</b> {multiple/total*100:.0f}% of return from multiple expansion, "
                     f"not sustainable.", body))
             elif multiple < -0.02:
                 story.append(Paragraph(
-                    f"<b>NOTE:</b> Multiple contracted {multiple:.1%} p.a. — "
+                    f"<b>NOTE:</b> Multiple contracted {multiple:.1%} p.a., "
                     f"fundamentals outperformed the stock.", body))
             if total > 0 and fundamental / total > 0.7:
                 story.append(Paragraph(
-                    f"<b>QUALITY:</b> {fundamental/total*100:.0f}% of return from fundamentals — "
+                    f"<b>QUALITY:</b> {fundamental/total*100:.0f}% of return from fundamentals, "
                     f"high quality.", body))
     else:
         story.append(Paragraph("Return decomposition not available. "
@@ -997,7 +999,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
     story.append(PageBreak())
 
     # ══ PAGE 5: PEERS ══════════════════════════════════════════════════════════
-    story.append(Paragraph(f"Peer Comparison — {r['ticker']}", h1))
+    story.append(Paragraph(f"Peer Comparison: {r['ticker']}", h1))
     peers = r.get("peers", [])
     if peers:
         # Peer table
@@ -1069,8 +1071,8 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
     story.append(PageBreak())
 
     # ══ PAGE 6: FORWARD DCF ═══════════════════════════════════════════════════
-    story.append(Paragraph(f"Forward DCF — {r['ticker']}", h1))
-    story.append(Paragraph("My View vs Market — Fair Value Estimate", h3))
+    story.append(Paragraph(f"Forward DCF: {r['ticker']}", h1))
+    story.append(Paragraph("My View vs Market: Fair Value Estimate", h3))
     story.append(Spacer(1, 0.2*cm))
 
     # Recompute Forward DCF using cached edited DataFrame
@@ -1176,7 +1178,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
 
             # Bridge
             story.append(PageBreak())
-            story.append(Paragraph(f"Forward DCF — {r['ticker']} (cont.)", h1))
+            story.append(Paragraph(f"Forward DCF: {r['ticker']} (cont.)", h1))
             story.append(Paragraph("Valuation Bridge", h2))
             cur_ev = model.market_ev
             ev_from_rev = cur_ev * (rev / model.base_revenue - 1)
@@ -1246,14 +1248,14 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
                 if model.price < mos_price else "Wait for better entry.")
             story.append(Paragraph(
                 f"<b>Entry Target (20% Margin of Safety):</b> {mos_price:,.1f} "
-                f"({mos_up:+.1%} from current) — {mos_note}", body))
+                f"({mos_up:+.1%} from current), {mos_note}", body))
     except Exception as e:
         story.append(Paragraph(f"<b>Forward DCF error:</b> {e}", body))
 
     # Footer note
     story.append(Spacer(1, 0.5*cm))
     story.append(Paragraph(
-        "Generated by CORE DCF Engine. For internal use only — not investment advice.",
+        "Generated by CORE DCF Engine. For internal use only, not investment advice.",
         small))
 
     doc.build(story)
