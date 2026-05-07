@@ -183,6 +183,27 @@ class CoreDCF:
                 self.mid_cycle_margin = float(trimmed.mean()) if len(trimmed) > 0 else float(recent.median())
             else:
                 self.mid_cycle_margin = float(margins_full.median())
+
+            # Sanity warning: extreme cyclicality — Mid-Cycle becomes unreliable when
+            # historical range includes both positive and negative margins (e.g. ENR GY:
+            # -10.7% to +4.7%, ArcelorMittal: -6.5% to +22%). The trimmed mean smoothes
+            # but doesn't fix the fundamental issue: these businesses have no stable
+            # "normal" state. Force user to make explicit assumption via Clean Margin.
+            if self.margin_min < -0.02 and self.margin_max > 0:
+                if clean_override is None:
+                    self._warnings.append(
+                        f"⚠ EXTREME CYCLICALITY: Margin range "
+                        f"[{self.margin_min:.1%} – {self.margin_max:.1%}] crosses zero. "
+                        f"Mid-Cycle of {self.mid_cycle_margin:.1%} smoothed by trimmed mean, "
+                        f"but business has no stable steady-state margin. "
+                        f"RECOMMENDATION: Set 'Clean Margin' field manually to your through-cycle "
+                        f"normalized estimate (e.g. 5-7% for steel, 3-5% for renewables hardware).")
+            if self.mid_cycle_margin <= 0:
+                self._warnings.append(
+                    f"⚠ NEGATIVE MID-CYCLE: Computed Mid-Cycle margin is {self.mid_cycle_margin:.2%} — "
+                    f"company has lost money on average through-cycle. Reverse DCF cannot solve meaningfully. "
+                    f"Override via 'Clean Margin' field with a normalized assumption, or use "
+                    f"alternative valuation framework (EV/Sales, P/Book, or RAB-multiple).")
         else:
             self.mid_cycle_margin = self.ebit_margin; self.margin_min = self.ebit_margin; self.margin_max = self.ebit_margin
 
@@ -399,7 +420,25 @@ class CoreDCF:
             if abs(ev-target)/max(target,1)<tol: return mid
             if ev>target: hi=mid
             else: lo=mid
-        return (lo+hi)/2
+        result = (lo+hi)/2
+        # Detect bound-pinning: if solver landed at extreme ends, result is unreliable
+        # (e.g. 80% means target EV cannot be reached even at max growth → likely
+        # negative or near-zero FCFF making the perpetuity model break down)
+        if result > 0.75:
+            self._warnings.append(
+                f"⚠ MODEL LIMITATION: Implied Growth solver hit upper bound (~80%) — "
+                f"this means the market price cannot be justified by even extreme growth assumptions. "
+                f"Likely cause: Base FCFF is too low (current: {self.base_fcff:,.0f}) relative to EV ({self.market_ev:,.0f}). "
+                f"Common for loss-making companies (negative Mid-Cycle margin) or transformation cases. "
+                f"Consider: (1) using EV/EBITDA or EV/Sales instead, (2) extending forecast period, "
+                f"(3) manually setting a positive normalized margin via 'Clean Margin' field.")
+        elif result < -0.25:
+            self._warnings.append(
+                f"⚠ MODEL LIMITATION: Implied Growth solver hit lower bound (~-30%) — "
+                f"market price is well below reasonable steady-state value. "
+                f"Possible: (1) market expects severe decline, (2) FCFF is overstated (one-off items), "
+                f"(3) major business model change being priced in.")
+        return result
 
     # ══ SCENARIOS (with probability weighting) ════════════════════════════════
     def scenario_analysis(self, base_g, offsets=(-0.03,0,0.03), probs=(0.25,0.50,0.25)):
