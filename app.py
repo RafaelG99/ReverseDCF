@@ -38,10 +38,14 @@ else:
 
 tg = st.sidebar.slider("Terminal Growth (%)", 0.0, 3.0, min(round(model.config.terminal_growth*100,1),1.5), 0.1) / 100
 proj_years = st.sidebar.slider("Implied Period (Y)", 5, 15, model.config.implied_years)
+use_midcycle = st.sidebar.checkbox("Use Mid-Cycle Margin for Base FCFF", value=True,
+    help="ON (default): Base FCFF normalized to mid-cycle margin (trimmed mean last 7Y). "
+         "OFF: Base FCFF uses current margin (peak/trough sensitive).")
 
 model.config.wacc = wacc
 model.config.terminal_growth = tg
 model.config.implied_years = proj_years
+model.config.use_midcycle_margin = use_midcycle
 model._prepare()
 r = model.run()
 
@@ -170,7 +174,7 @@ with tab1:
     for w in w_rng:
         row={}
         for t in t_rng:
-            cfg=DCFConfig(wacc=w,terminal_growth=t,implied_years=proj_years)
+            cfg=DCFConfig(wacc=w,terminal_growth=t,implied_years=proj_years,use_midcycle_margin=use_midcycle)
             m2=CoreDCF(model.hist,model.current,cfg,ticker=r["ticker"])
             row[f"Tg={t:.1%}"]=m2.solve_implied_growth()
         row["WACC"]=w; rows.append(row)
@@ -205,7 +209,9 @@ with tab2:
         st.subheader(f"C-Score: {q.c_score.total}/5")
         st.caption("Lower = better quality. Each flag = 1 point.")
         for k,v in q.c_score.details.items():
-            flag = "🔴" if ("Declining" in v or "Increasing" in v or ">" in v) else "🟢"
+            # Detect "bad" details: any string starting with non-OK markers
+            is_bad = not v.startswith("OK") and not v.startswith("Skipped")
+            flag = "🔴" if is_bad else "🟢"
             st.write(f"{flag} **{k}**: {v}")
 
     # Historical Multiples
@@ -657,7 +663,9 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
     # ══ PAGE 1: COVER + REVERSE DCF VERDICT ══════════════════════════════════
     story.append(Paragraph(f"CORE DCF Report: {r['ticker']}", h1))
     story.append(Paragraph(f"Generated {datetime.now():%d %b %Y, %H:%M} · "
-        f"WACC {wacc:.2%} · Tg {tg:.2%} · Implied Period {proj_years}Y", small))
+        f"WACC {wacc:.2%} · Tg {tg:.2%} · Implied Period {proj_years}Y · "
+        f"Base FCFF: {'Mid-Cycle' if model.config.use_midcycle_margin else 'Current'} margin",
+        small))
     story.append(Spacer(1, 0.3*cm))
 
     # Verdict box (replicate Tab 1 logic)
@@ -833,7 +841,8 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
     for w in w_rng:
         row = [f"{w:.1%}"]
         for t in t_rng:
-            cfg = DCFConfig(wacc=w, terminal_growth=t, implied_years=proj_years)
+            cfg = DCFConfig(wacc=w, terminal_growth=t, implied_years=proj_years,
+                use_midcycle_margin=model.config.use_midcycle_margin)
             m2 = CoreDCF(model.hist, model.current, cfg, ticker=r["ticker"])
             row.append(f"{m2.solve_implied_growth():.1%}")
         sens_data.append(row)
@@ -879,7 +888,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd):
     cscore_lines = [Paragraph(f"<b>C-Score: {q.c_score.total}/5</b>", h3),
                     Paragraph("Lower = better quality. Each flag = 1 point.", small)]
     for k, v in q.c_score.details.items():
-        is_bad = ("Declining" in v or "Increasing" in v or ">" in v)
+        is_bad = not v.startswith("OK") and not v.startswith("Skipped")
         marker = "[FAIL]" if is_bad else "[OK]"
         color = C_RED if is_bad else C_GREEN
         cscore_lines.append(Paragraph(
