@@ -21,6 +21,7 @@ class DCFConfig:
     consensus_years: int = 2
     implied_years: int = 8
     fade_years: int = 10
+    use_midcycle_margin: bool = True  # If True, base FCFF uses mid-cycle margin instead of current
 
 @dataclass
 class CScore:
@@ -157,13 +158,31 @@ class CoreDCF:
         else:
             self.base_revenue = fy_rev; self.base_ebit = fy_ebit
 
-        # Current margin vs mid-cycle
+        # Current margin
         self.ebit_margin = self.base_ebit / self.base_revenue if self.base_revenue else 0.15
+
+        # Mid-cycle margin: trimmed mean of last 7Y (20% trim top/bottom)
+        # — avoids structural breaks (e.g. divestments) and one-off restructuring years.
+        # User override via Current sheet field "Clean Margin" takes precedence.
+        clean_override = self._safe_num(self.current.get("Clean Margin"))
+        if clean_override is not None and clean_override > 1: clean_override /= 100
+
         if "EBIT" in h and "Revenue" in h:
-            margins = (h["EBIT"] / h["Revenue"]).replace([np.inf,-np.inf],np.nan).dropna()
-            self.mid_cycle_margin = float(margins.median()) if len(margins) >= 3 else self.ebit_margin
-            self.margin_min = float(margins.min()) if len(margins) >= 3 else self.ebit_margin
-            self.margin_max = float(margins.max()) if len(margins) >= 3 else self.ebit_margin
+            margins_full = (h["EBIT"] / h["Revenue"]).replace([np.inf,-np.inf],np.nan).dropna()
+            self.margin_min = float(margins_full.min()) if len(margins_full) >= 3 else self.ebit_margin
+            self.margin_max = float(margins_full.max()) if len(margins_full) >= 3 else self.ebit_margin
+
+            if clean_override is not None and 0.01 < clean_override < 0.60:
+                self.mid_cycle_margin = clean_override
+                self._warnings.append(f"INFO: Mid-Cycle Margin overridden by user ({clean_override:.1%})")
+            elif len(margins_full) >= 5:
+                # Trimmed mean of last 7Y
+                recent = margins_full.iloc[-7:] if len(margins_full) >= 7 else margins_full
+                lo, hi = np.percentile(recent, [20, 80])
+                trimmed = recent[(recent >= lo) & (recent <= hi)]
+                self.mid_cycle_margin = float(trimmed.mean()) if len(trimmed) > 0 else float(recent.median())
+            else:
+                self.mid_cycle_margin = float(margins_full.median())
         else:
             self.mid_cycle_margin = self.ebit_margin; self.margin_min = self.ebit_margin; self.margin_max = self.ebit_margin
 
@@ -204,8 +223,11 @@ class CoreDCF:
                     if 0<r<0.50: tax_rates.append(r)
         self.tax_rate = float(np.median(tax_rates)) if tax_rates else 0.20
 
-        # FCFF
-        self.base_fcff = self._compute_fcff(self.base_revenue)
+        # FCFF: use mid-cycle margin by default (toggleable via DCFConfig)
+        if self.config.use_midcycle_margin:
+            self.base_fcff = self._compute_fcff(self.base_revenue, margin_override=self.mid_cycle_margin)
+        else:
+            self.base_fcff = self._compute_fcff(self.base_revenue)
         shares = self._last(h,"Shares_Outstanding") or self._safe_num(self.current.get("Shares Out")) or 1
         self.shares = shares; self.base_fcff_per_share = self.base_fcff/shares if shares else 0
 
@@ -304,32 +326,82 @@ class CoreDCF:
 
     # ══ C-SCORES ══════════════════════════════════════════════════════════════
     def compute_c_score(self):
-        h=self.hist; cs=CScore(details={})
-        def _tr(s,n=3): s=s.dropna(); return len(s)>=n and s.iloc[-1]>s.iloc[0]
-        def _td(s,n=3): s=s.dropna(); return len(s)>=n and s.iloc[-1]<s.iloc[0]
+        """C-Score: detect earnings management. Uses 5-7Y windows + magnitude thresholds
+        (not just trend direction) to avoid false positives from cyclicality, M&A, and
+        strategic working-capital decisions. User can flag a major M&A year via Current
+        sheet field 'Major MA Year' (4-digit YYYY) to skip the asset growth check."""
+        h = self.hist; cs = CScore(details={})
+
+        # Use last 5Y for trend tests; require magnitude, not just sign
+        WIN = 5
+
+        # 1. CFO/NI: declining only if median <0.8 (real quality issue), not just endpoints
         if "CFO" in h and "Net_Income" in h:
-            r=(h["CFO"]/h["Net_Income"]).replace([np.inf,-np.inf],np.nan)
-            if _td(r): cs.cfo_ni=1; cs.details["CFO/NI"]="Declining"
-            else: cs.details["CFO/NI"]="OK"
+            ratio = (h["CFO"]/h["Net_Income"]).replace([np.inf,-np.inf],np.nan).dropna()
+            recent = ratio.iloc[-WIN:] if len(ratio) >= WIN else ratio
+            med = float(recent.median()) if len(recent) > 0 else 1.0
+            if med < 0.8:
+                cs.cfo_ni = 1; cs.details["CFO/NI"] = f"Weak ({med:.2f}x median)"
+            else:
+                cs.details["CFO/NI"] = f"OK ({med:.2f}x)"
+
+        # 2. DSO: only flag if last 2Y avg vs first 2Y avg of window rises ≥15%
         if "Accounts_Receivable" in h and "Revenue" in h:
-            d=h["Accounts_Receivable"]/h["Revenue"]*365
-            if _tr(d): cs.dso=1; cs.details["DSO"]="Increasing"
-            else: cs.details["DSO"]="OK"
+            dso_s = (h["Accounts_Receivable"]/h["Revenue"]*365).replace([np.inf,-np.inf],np.nan).dropna()
+            recent = dso_s.iloc[-WIN:] if len(dso_s) >= WIN else dso_s
+            if len(recent) >= 4:
+                early = recent.iloc[:2].mean(); late = recent.iloc[-2:].mean()
+                if early > 0 and (late/early - 1) >= 0.15:
+                    cs.dso = 1; cs.details["DSO"] = f"Up {(late/early-1):+.0%} ({early:.0f}→{late:.0f}d)"
+                else:
+                    cs.details["DSO"] = f"OK ({late:.0f}d)"
+            else:
+                cs.details["DSO"] = "OK (insufficient data)"
+
+        # 3. DSI: same logic — ≥15% rise required, ignore <5% noise
         if "Inventory" in h and "Revenue" in h:
-            d=h["Inventory"]/h["Revenue"]*365
-            if _tr(d): cs.dsi=1; cs.details["DSI"]="Increasing"
-            else: cs.details["DSI"]="OK"
+            dsi_s = (h["Inventory"]/h["Revenue"]*365).replace([np.inf,-np.inf],np.nan).dropna()
+            recent = dsi_s.iloc[-WIN:] if len(dsi_s) >= WIN else dsi_s
+            if len(recent) >= 4:
+                early = recent.iloc[:2].mean(); late = recent.iloc[-2:].mean()
+                if early > 0 and (late/early - 1) >= 0.15:
+                    cs.dsi = 1; cs.details["DSI"] = f"Up {(late/early-1):+.0%} ({early:.0f}→{late:.0f}d)"
+                else:
+                    cs.details["DSI"] = f"OK ({late:.0f}d)"
+            else:
+                cs.details["DSI"] = "OK (insufficient data)"
+
+        # 4. Depr intensity: only flag if ≥30% drop (deferring real CapEx)
         if "DA" in h and "Total_Assets" in h:
-            d=h["DA"]/h["Total_Assets"]
-            if _td(d): cs.depr_intensity=1; cs.details["Depr"]="Declining"
-            else: cs.details["Depr"]="OK"
+            d = (h["DA"]/h["Total_Assets"]).replace([np.inf,-np.inf],np.nan).dropna()
+            recent = d.iloc[-WIN:] if len(d) >= WIN else d
+            if len(recent) >= 4:
+                early = recent.iloc[:2].mean(); late = recent.iloc[-2:].mean()
+                if early > 0 and (late/early - 1) <= -0.30:
+                    cs.depr_intensity = 1; cs.details["Depr"] = f"Down {(late/early-1):+.0%}"
+                else:
+                    cs.details["Depr"] = "OK"
+            else:
+                cs.details["Depr"] = "OK (insufficient data)"
+
+        # 5. Assets vs Rev: 5Y window, skipped if user flagged a major M&A year
+        ma_year = self._safe_num(self.current.get("Major MA Year"))
         if "Total_Assets" in h and "Revenue" in h:
-            ta=h["Total_Assets"].dropna(); rv=h["Revenue"].dropna()
-            if len(ta)>=3 and len(rv)>=3:
-                ag=ta.iloc[-1]/ta.iloc[-3]-1; rg=rv.iloc[-1]/rv.iloc[-3]-1
-                if ag>rg+0.05: cs.asset_growth=1; cs.details["Assets"]=f"Asset gr ({ag:.1%}) > Rev gr ({rg:.1%})"
-                else: cs.details["Assets"]="OK"
-        cs.total=cs.cfo_ni+cs.dso+cs.dsi+cs.depr_intensity+cs.asset_growth
+            ta = h["Total_Assets"].dropna(); rv = h["Revenue"].dropna()
+            if ma_year and 1990 < ma_year < 2100:
+                cs.details["Assets"] = f"Skipped (Major M&A {int(ma_year)})"
+            elif len(ta) >= WIN+1 and len(rv) >= WIN+1:
+                ag = (ta.iloc[-1]/ta.iloc[-(WIN+1)])**(1/WIN) - 1
+                rg = (rv.iloc[-1]/rv.iloc[-(WIN+1)])**(1/WIN) - 1
+                if ag > rg + 0.05:
+                    cs.asset_growth = 1
+                    cs.details["Assets"] = f"Asset gr ({ag:.1%} p.a.) > Rev gr ({rg:.1%} p.a.)"
+                else:
+                    cs.details["Assets"] = f"OK ({ag:.1%} vs {rg:.1%} p.a.)"
+            else:
+                cs.details["Assets"] = "OK (insufficient data)"
+
+        cs.total = cs.cfo_ni + cs.dso + cs.dsi + cs.depr_intensity + cs.asset_growth
         return cs
 
     # ══ QUALITY ═══════════════════════════════════════════════════════════════
@@ -357,16 +429,27 @@ class CoreDCF:
         if "Total_Debt" in h and "EBITDA" in h:
             d=self._last(h,"Total_Debt") or 0; e=self._last(h,"EBITDA") or 1
             qp.debt_ebitda=d/e if e else 0
-        qp.c_score=self.compute_c_score()
-        sc=0
-        if qp.roic_median>0.15: sc+=2
-        elif qp.roic_median>0.10: sc+=1
-        if qp.margin_stability<0.03: sc+=1
-        if qp.fcf_conversion>1.0: sc+=1
-        if qp.debt_ebitda<2.0: sc+=1
-        if qp.c_score.total<=1: sc+=1
-        sc-=qp.c_score.total
-        qp.grade="A" if sc>=5 else "B" if sc>=3 else "C" if sc>=1 else "D"
+        qp.c_score = self.compute_c_score()
+        # Quality scoring: positive factors capped, C-Score subtractor capped at -3
+        # to prevent a single overactive signal from dominating.
+        sc = 0
+        # ROIC: tiered bonus
+        if qp.roic_median > 0.20: sc += 3   # exceptional
+        elif qp.roic_median > 0.15: sc += 2
+        elif qp.roic_median > 0.10: sc += 1
+        # Stability
+        if qp.margin_stability < 0.03: sc += 1
+        # FCF conversion
+        if qp.fcf_conversion > 1.0: sc += 1
+        # Leverage: tiered
+        if qp.debt_ebitda < 1.5: sc += 2     # very strong
+        elif qp.debt_ebitda < 2.5: sc += 1   # acceptable
+        # Clean C-Score bonus
+        if qp.c_score.total <= 1: sc += 1
+        # Subtract C-Score, capped at -3 (prevents single signal from killing grade)
+        sc -= min(qp.c_score.total, 3)
+        # Grade thresholds: A ≥6, B ≥4, C ≥2, D <2
+        qp.grade = "A" if sc >= 6 else "B" if sc >= 4 else "C" if sc >= 2 else "D"
         return qp
 
     # ══ HISTORICAL MULTIPLES ══════════════════════════════════════════════════
