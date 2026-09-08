@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from reverse_dcf_engine import CoreDCF, DCFConfig
+import guidance_dcf as gd
 import tempfile
 
 st.set_page_config(page_title="CORE DCF", page_icon="📊", layout="wide")
@@ -18,7 +19,11 @@ if uploaded:
         tmp.write(uploaded.read()); tmp_path = tmp.name
     try:
         model = CoreDCF.from_excel(tmp_path)
-        st.sidebar.success(f"Loaded: {model.ticker}")
+        try:
+            model.guidance = gd.read_guidance_sheet(pd.ExcelFile(tmp_path))
+        except Exception as _ge:
+            model.guidance = None; st.sidebar.warning(f"Guidance sheet ignored: {_ge}")
+        st.sidebar.success(f"Loaded: {model.ticker}" + (" · Guidance ✓" if getattr(model, "guidance", None) else ""))
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 if model is None:
@@ -37,6 +42,14 @@ else:
     wacc = st.sidebar.number_input("WACC (%)", value=8.0, step=0.25, format="%.2f") / 100
 tg = st.sidebar.slider("Terminal Growth (%)", 0.0, 3.0, min(round(model.config.terminal_growth*100,1),1.5), 0.1) / 100
 proj_years = st.sidebar.slider("Implied Period (Y)", 5, 15, model.config.implied_years)
+if getattr(model, "has_consensus_fy3", False):
+    cons_years = st.sidebar.radio("Consensus Years (Stage 1)", [2, 3], index=0, horizontal=True,
+        help="3 = also use BEST_SALES_3BF. Relevant for launch/ramp cases where FY3 consensus differs strongly from FY2.")
+else:
+    cons_years = 2
+use_bbg_ev = st.sidebar.checkbox("Use BBG EV (incl. adjustments)", value=True,
+    help="ON: solver targets Bloomberg ENTERPRISE_VALUE (pension/other adjustments treated as debt-like in all per-share conversions). "
+         "OFF: EV = MCap + Net Debt + Minorities. Switch OFF if the BBG adjustment looks spurious (FX mix, contingent items).")
 use_midcycle = st.sidebar.checkbox("Use Mid-Cycle Margin for Base FCFF", value=True,
     help="ON (default): Base FCFF normalized to mid-cycle margin (trimmed mean last 7Y). "
          "OFF: Base FCFF uses current margin (peak/trough sensitive).")
@@ -44,7 +57,10 @@ use_midcycle = st.sidebar.checkbox("Use Mid-Cycle Margin for Base FCFF", value=T
 # ── AI Layer Controls ─────────────────────────────────────────────────────────
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🤖 AI Layer (Claude Opus 4.7)")
-api_key = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
+try:
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+except Exception:          # no secrets.toml (local run without AI layer)
+    api_key = ""
 ai_available = bool(api_key)
 if not ai_available:
     st.sidebar.caption("⚠ No API key. Add ANTHROPIC_API_KEY in secrets.toml.")
@@ -92,12 +108,14 @@ if ai_smart_wacc and ai_available:
 model.config.wacc = wacc
 model.config.terminal_growth = tg
 model.config.implied_years = proj_years
+model.config.consensus_years = cons_years
 model.config.use_midcycle_margin = use_midcycle
+model.config.use_bbg_ev = use_bbg_ev
 model._prepare()
 r = model.run()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 Reverse DCF", "📊 Quality & Multiples", "📈 Return Decomposition", "👥 Peers", "🎯 Forward DCF"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔍 Reverse DCF", "📊 Quality & Multiples", "📈 Return Decomposition", "👥 Peers", "🎯 Forward DCF", "🧭 Guidance DCF"])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1: REVERSE DCF
@@ -225,7 +243,10 @@ with tab1:
         st.write(f"D&A: {model.da_pct:.1%} · CapEx: {model.capex_pct:.1%} · SBC: {model.sbc_pct:.1%} · Tax: {model.tax_rate:.1%}")
         st.write(f"DSO: {model.dso:.0f} days · DPI: {model.dpi:.0f} days · NWC/Rev: {model.nwc_change_pct:.1%}")
         st.write(f"MCap: {model.market_cap:,.0f} · Net Debt: {model.net_debt:,.0f} (Lease: {model.lease_liab:,.0f}) · EV: {model.market_ev:,.0f}")
-        st.write(f"Consensus FY1: {model.consensus_growth_fy1:+.1%} · FY2: {model.consensus_growth_fy2:+.1%}")
+        fy3_txt = f" · FY3: {model.consensus_growth_fy3:+.1%}{'' if cons_years == 3 else ' (unused)'}" if getattr(model, "has_consensus_fy3", False) else ""
+        st.write(f"Consensus FY1: {model.consensus_growth_fy1:+.1%} · FY2: {model.consensus_growth_fy2:+.1%}{fy3_txt}")
+        if getattr(model, "_ev_adjustment", 0):
+            st.write(f"EV source: BBG · adjustment vs MCap+NetDebt: {model._ev_adjustment:+,.0f} (treated as debt-like claim in all per-share conversions)")
 
     # Sensitivity
     st.markdown("---")
@@ -323,8 +344,10 @@ with tab3:
             is_dilution = rd["buyback_ann"] < -0.05  # shares increased >5% p.a.
             bb_label = "Dilution" if is_dilution else "Buyback"
             
+            margin_nm = rd.get("margin_nm", False)
+            mult_label = "Multiple<br>& Margin" if margin_nm else "Multiple<br>Expansion"
             comps = [("Revenue<br>Growth",rd["revenue_growth_ann"]),("Margin<br>Effect",rd["margin_effect_ann"]),
-                (bb_label,rd["buyback_ann"]),("Dividend",rd["dividend_yield"]),("Multiple<br>Expansion",rd["multiple_expansion_ann"])]
+                (bb_label,rd["buyback_ann"]),("Dividend",rd["dividend_yield"]),(mult_label,rd["multiple_expansion_ann"])]
             vals=[c[1] for c in comps]
             fig_rd=go.Figure(go.Waterfall(x=[c[0] for c in comps],y=vals,
                 connector={"line":{"color":"#ccc"}},increasing={"marker":{"color":C_GREEN}},
@@ -338,14 +361,17 @@ with tab3:
         with rr:
             st.markdown("**Annualized Components**")
             st.write(f"📈 Revenue Growth: **{rd['revenue_growth_ann']:+.1%}**")
-            st.write(f"📊 Margin Effect: **{rd['margin_effect_ann']:+.1%}** ({rd['margin_first']:.1%} → {rd['margin_last']:.1%})")
+            if margin_nm:
+                st.write(f"📊 Margin Effect: **n/m** ({rd['margin_first']:.1%} → {rd['margin_last']:.1%} crosses zero; folded into multiple)")
+            else:
+                st.write(f"📊 Margin Effect: **{rd['margin_effect_ann']:+.1%}** ({rd['margin_first']:.1%} → {rd['margin_last']:.1%})")
             if is_dilution:
                 st.write(f"🔻 Dilution: **{rd['buyback_ann']:+.1%}** ({rd['shares_first']:,.0f} → {rd['shares_last']:,.0f} shares)")
                 st.caption("⚠️ Shares increased significantly (IPO, capital raises, M&A). Multiple Expansion below is distorted.")
             else:
                 st.write(f"🔄 Buyback Yield: **{rd['buyback_ann']:+.1%}** ({rd['shares_first']:,.0f} → {rd['shares_last']:,.0f})")
             st.write(f"💰 Dividend Yield: **{rd['dividend_yield']:.1%}**")
-            st.write(f"📐 Multiple Expansion: **{rd['multiple_expansion_ann']:+.1%}**{'  ⚠️ unreliable (dilution distortion)' if is_dilution else ''}")
+            st.write(f"📐 {'Multiple & Margin (residual)' if margin_nm else 'Multiple Expansion'}: **{rd['multiple_expansion_ann']:+.1%}**{'  ⚠️ unreliable (dilution distortion)' if is_dilution else ''}")
             st.markdown("---")
             st.write(f"**Total Return: {rd['total_return_ann']:+.1%} p.a.**")
             st.write(f"Price: {rd['price_first']:,.1f} → {rd['price_last']:,.1f}")
@@ -354,7 +380,7 @@ with tab3:
             financial = rd["buyback_ann"] + rd["dividend_yield"]
             multiple = rd["multiple_expansion_ann"]
             total = rd["total_return_ann"]
-            if abs(total) > 0.005 and not is_dilution:
+            if abs(total) > 0.005 and not is_dilution and not margin_nm:
                 st.markdown("---")
                 if multiple > 0.02:
                     st.warning(f"⚠️ {multiple/total*100:.0f}% of return from multiple expansion — not sustainable")
@@ -491,7 +517,7 @@ with tab5:
             sbc=float(edited.loc["SBC/Rev (%)",col])/100; tx=float(edited.loc["Tax Rate (%)",col])/100
             rev*=(1+g); ebit=rev*m; nopat=ebit*(1-tx); fcff=nopat+rev*da-rev*cx-rev*sbc
             pv=fcff/(1+wacc)**(i+1); pv_e+=pv
-            proj_rows.append({"Year":col,"Revenue":rev,"Growth":g,"EBIT Margin":m,"EBIT":ebit,"FCFF":fcff,"PV":pv})
+            proj_rows.append({"Year":col,"Revenue":rev,"Growth":g,"EBIT Margin":m,"EBIT":ebit,"EBITDA":ebit+rev*da,"FCFF":fcff,"PV":pv})
 
         tg_f=float(edited.loc["Revenue Growth (%)","Terminal"])/100; tm_f=float(edited.loc["EBIT Margin (%)","Terminal"])/100
         cx_f=float(edited.loc["CapEx/Rev (%)","Terminal"])/100; da_f=float(edited.loc["D&A/Rev (%)","Terminal"])/100
@@ -499,7 +525,7 @@ with tab5:
         t_rev=rev*(1+tg_f); t_nopat=t_rev*tm_f*(1-tx_f); t_fcff=t_nopat+t_rev*da_f-t_rev*cx_f-t_rev*sbc_f
         if wacc<=tg_f: st.error("WACC must exceed Terminal Growth!"); st.stop()
         tv_v=t_fcff/(wacc-tg_f); pv_tv=tv_v/(1+wacc)**n_fwd; tot_ev=pv_e+pv_tv
-        fair_eq=tot_ev-model.net_debt-model.minority; fp=fair_eq/model.shares if model.shares else 0
+        fair_eq=model.ev_to_equity(tot_ev); fp=fair_eq/model.shares if model.shares else 0
         up=fp/model.price-1 if model.price else 0
 
         if up>0.20: fv,fc="UNDERVALUED",C_GREEN
@@ -542,13 +568,20 @@ with tab5:
         bl,br=st.columns([2,3])
         with bl:
             st.write(f"PV Explicit: **{pv_e:,.0f}**"); st.write(f"PV Terminal: **{pv_tv:,.0f}**")
-            st.write(f"= EV: **{tot_ev:,.0f}**"); st.write(f"− Net Debt: {model.net_debt:,.0f}")
+            st.write(f"= EV: **{tot_ev:,.0f}**"); st.write(f"− Net Debt: {model.net_debt:,.0f} · Minorities: {model.minority:,.0f} · EV adj.: {getattr(model, '_ev_adjustment', 0):,.0f}")
             st.write(f"= Equity: **{fair_eq:,.0f}** ÷ {model.shares:,.1f} = **{fp:,.1f}**")
         with br:
             cur_ev=model.market_ev; cur_ebit=model.base_ebit or 1
             fin_ebit=proj_rows[-1]["EBIT"]
-            ev_from_rev=cur_ev*(rev/model.base_revenue-1); ev_from_m=cur_ev*((float(edited.loc["EBIT Margin (%)",f"Y{n_fwd}"])/100)/model.ebit_margin-1) if model.ebit_margin else 0
+            ev_from_rev=cur_ev*(rev/model.base_revenue-1)
+            # Margin leg only meaningful on a positive base margin; otherwise the ratio explodes
+            # (e.g. -3% → 11.5% gives -483% "margin change"). Fold into residual instead.
+            m_final=float(edited.loc["EBIT Margin (%)",f"Y{n_fwd}"])/100
+            bridge_margin_ok = model.ebit_margin > 0.01 and m_final > 0
+            ev_from_m=cur_ev*(m_final/model.ebit_margin-1) if bridge_margin_ok else 0.0
             ev_res=tot_ev-cur_ev-ev_from_rev-ev_from_m
+            if not bridge_margin_ok:
+                st.caption(f"⚠ Base EBIT margin {model.ebit_margin:.1%} ≤ 0: margin leg not meaningful, shown as 0 and folded into 'Multiple & Other'.")
             fig_b=go.Figure(go.Waterfall(x=["Current EV","Revenue<br>Growth","Margin<br>Change","Multiple<br>& Other","Your EV"],
                 y=[cur_ev,ev_from_rev,ev_from_m,ev_res,0],measure=["absolute","relative","relative","relative","total"],
                 connector={"line":{"color":"#ccc"}},increasing={"marker":{"color":C_GREEN}},decreasing={"marker":{"color":C_RED}},
@@ -567,15 +600,17 @@ with tab5:
             projected_ni=last_ni)
         hm = r["historical_multiples"]
         im1,im2,im3 = st.columns(3)
-        for col_w, metric, hist_col in [(im1,"implied_EV/EBIT","EV/EBITDA"),(im2,"implied_P/E","P/E"),(im3,"implied_P/Sales","P/Sales")]:
+        for col_w, metric, hist_col in [(im1,"implied_EV/EBITDA","EV/EBITDA"),(im2,"implied_P/E","P/E"),(im3,"implied_P/Sales","P/Sales")]:
             val = impl.get(metric)
             if val and not np.isnan(val):
                 h_med = hm[hist_col].dropna().median() if hist_col in hm and len(hm[hist_col].dropna()) > 0 else None
                 label = metric.replace("implied_","")
-                if h_med and not np.isnan(h_med):
+                if h_med and not np.isnan(h_med) and h_med > 0 and h_med < 60:
                     col_w.metric(label, f"{val:.1f}x",
                         delta=f"vs {h_med:.1f}x hist median",
                         delta_color="inverse" if val > h_med * 1.2 else "normal")
+                elif h_med and not np.isnan(h_med):
+                    col_w.metric(label, f"{val:.1f}x", delta=f"hist median {h_med:.0f}x n/m", delta_color="off")
                 else:
                     col_w.metric(label, f"{val:.1f}x")
             
@@ -595,11 +630,206 @@ with tab5:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# TAB 6: GUIDANCE DCF (segment-driven, management plan → implied plan fulfilment)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab6:
+    st.title(f"Guidance DCF: {r['ticker']}")
+    st.markdown("**Management plan (segments Base → Target) → fair value → what share of the plan does the price discount?** "
+                "Cost structure is derived from the guidance (contribution margin × revenue − fixed cost base), not assumed as a margin.")
+
+    gs = getattr(model, "guidance", None) or {}
+    gp = gs.get("params", {}); gsegs = gs.get("segments", [])
+    _last_year = int(model.hist.index[-1].year) if len(model.hist) else 2025
+    if not gsegs:
+        gsegs, _by, _ty = gd.default_segments_from_model(model.base_revenue, _last_year)
+        st.info("No 'Guidance' sheet in the template — starting from a single 'Total' segment. "
+                "Edit the segment table below or add a sheet 'Guidance' (see Readme in Excel template).")
+    else:
+        _by, _ty = int(gp.get("Base Year", _last_year)), int(gp.get("Target Year", _last_year + 5))
+
+    g1, g2, g3, g4 = st.columns(4)
+    base_year = g1.number_input("Base Year", value=_by, step=1, format="%d")
+    target_year = g2.number_input("Target Year", value=_ty, step=1, format="%d")
+    ebitda_base = g3.number_input("EBITDA Base (guidance)", value=float(gp.get("EBITDA Base", model.base_ebit + model.base_revenue*model.da_pct)), format="%.1f")
+    ebitda_target = g4.number_input("EBITDA Target (guidance)", value=float(gp.get("EBITDA Target", ebitda_base*2)), format="%.1f")
+
+    seg_df = pd.DataFrame([{"Segment": s.name, "Base": s.base, "Target": s.target, "Scalable": s.scalable,
+                            "Ramp (% of target per year)": ",".join(f"{x*100:.0f}" for x in s.ramp) if s.ramp else ""} for s in gsegs])
+    st.caption("Segments: **Scalable** = the plan-fulfilment lever applies (uncertain growth drivers). "
+               "**Ramp** = optional S-curve as % of target per plan year (e.g. `0,5,21,53,100`); empty = geometric path.")
+    seg_edit = st.data_editor(seg_df, num_rows="dynamic", use_container_width=True, key=f"guid_seg_{r['ticker']}",
+        column_config={"Scalable": st.column_config.CheckboxColumn(), "Base": st.column_config.NumberColumn(format="%.1f"),
+                       "Target": st.column_config.NumberColumn(format="%.1f")})
+
+    with st.expander("Cash-flow bridge, fade & currency", expanded=False):
+        c1, c2, c3, c4 = st.columns(4)
+        fx = c1.number_input("FX guidance → price ccy", value=float(gp.get("FX", 1.0)), format="%.4f",
+                             help="e.g. guidance in EUR, share price in CHF → EURCHF ≈ 0.94. 1.0 if same currency.")
+        tax_g = c2.number_input("Tax rate", value=float(gp.get("Tax Rate", model.tax_rate)), format="%.3f")
+        da_base = c3.number_input("D&A base year (abs.)", value=float(gp.get("D&A Base", model.base_revenue*model.da_pct)), format="%.1f")
+        da_lt = c4.number_input("D&A / Rev long-run", value=float(gp.get("D&A LT %", 0.05)), format="%.3f")
+        c5, c6, c7, c8 = st.columns(4)
+        capex_g = c5.number_input("CapEx / Rev", value=float(gp.get("CapEx %", model.capex_pct)), format="%.3f")
+        sbc_g = c6.number_input("SBC / Rev", value=float(gp.get("SBC %", model.sbc_pct)), format="%.3f")
+        nwc_g = c7.number_input("NWC / Δ Rev", value=float(gp.get("NWC %", 0.15)), format="%.3f")
+        opex_g = c8.number_input("Fixed-cost growth p.a.", value=float(gp.get("Opex Growth", 0.015)), format="%.3f")
+        c9, c10, c11 = st.columns(3)
+        g_post = c9.number_input("Growth 1st fade year", value=float(gp.get("Post-Plan Growth", 0.12)), format="%.3f")
+        fade_yrs = int(c10.number_input("Fade years", value=int(gp.get("Fade Years", 10)), step=1, format="%d"))
+        m_fade = c11.number_input("EBITDA margin end of fade", value=float(gp.get("Margin Fade To", 0.35)), format="%.3f")
+
+    # Build inputs
+    segs = []
+    for _, row in seg_edit.iterrows():
+        if pd.isna(row["Segment"]) or str(row["Segment"]).strip() == "": continue
+        ramp_txt = str(row.get("Ramp (% of target per year)", "") or "").strip()
+        ramp = [float(x)/100 for x in ramp_txt.replace(";", ",").split(",")] if ramp_txt else None
+        if ramp is not None and len(ramp) != int(target_year - base_year):
+            st.warning(f"Segment '{row['Segment']}': ramp needs {int(target_year-base_year)} values, got {len(ramp)} — ignored.")
+            ramp = None
+        segs.append(gd.Segment(str(row["Segment"]), float(row["Base"] or 0), float(row["Target"] or 0), bool(row["Scalable"]), ramp))
+    net_cash_g = -(model.net_debt + model.minority + getattr(model, "_ev_adjustment", 0.0))
+    ginp = gd.GuidanceInputs(int(base_year), int(target_year), segs, ebitda_base, ebitda_target,
+        tax_rate=tax_g, da_base=da_base, da_lt_pct=da_lt, capex_pct=capex_g, sbc_pct=sbc_g, nwc_incr_pct=nwc_g,
+        opex_growth=opex_g, g_post=g_post, fade_years=fade_yrs, margin_fade_to=m_fade,
+        wacc=wacc, tg=tg, net_cash=net_cash_g, shares=model.shares, fx=fx, price=model.price)
+
+    if ginp.n_plan < 1 or ginp.rev_target <= ginp.rev_base:
+        st.error("Target year must be after base year and target revenue above base revenue."); st.stop()
+
+    lv1, lv2 = st.columns([2, 3])
+    fulfil = lv1.slider("Plan fulfilment (scalable segments)", 0.0, 1.5, 1.0, 0.05, format="%.2f")
+    lv2.caption(f"Implied cost structure: contribution margin **{ginp.contribution_margin:.1%}**, fixed cost base **{ginp.opex_base:,.1f}** "
+                f"(+{opex_g:.1%} p.a.) · WACC {wacc:.2%} / Tg {tg:.2%} from sidebar · Net cash used: {net_cash_g:,.1f} "
+                f"(incl. minorities & EV adj.) · Shares {model.shares:,.2f}")
+
+    try:
+        res = gd.value(ginp, fulfil)
+        impl = gd.implied_fulfilment(ginp)
+        scen = gd.scenarios(ginp)
+        p_plan = gd.implied_probability(scen, model.price)
+        path = gd.fcff_path(ginp, fulfil)
+        plan_path = gd.fcff_path(ginp, 1.0)
+        n = ginp.n_plan
+
+        # Verdict box
+        up = res["price"]/model.price - 1 if model.price else 0
+        if impl is None: imp_txt = "not solvable (price outside 0–300% fulfilment range)"
+        else:
+            rev_impl = gd.segment_paths(ginp, impl)["Revenue"].iloc[-1]
+            ebitda_impl = gd.fcff_path(ginp, impl)["EBITDA"].iloc[n-1]
+            cagr_impl = (rev_impl/ginp.rev_base)**(1/n)-1
+            imp_txt = (f"<b>{impl:.0%}</b> of the plan's scalable growth → Revenue {target_year}: <b>{rev_impl:,.0f}</b> (plan {ginp.rev_target:,.0f}), "
+                       f"EBITDA <b>{ebitda_impl:,.0f}</b> (plan {ebitda_target:,.0f}), CAGR <b>{cagr_impl:.1%}</b> "
+                       f"(plan {(ginp.rev_target/ginp.rev_base)**(1/n)-1:.1%}, Reverse DCF implied FCF growth {r['implied_growth']:.1%})")
+        vc = C_GREEN if up > 0.2 else C_AMBER if up > -0.1 else C_RED
+        st.markdown(f"""<div style="background:{vc}15;border-left:5px solid {vc};padding:18px 22px;border-radius:4px;margin:14px 0;">
+            <span style="font-size:24px;font-weight:bold;color:{vc};">Fair value @ {fulfil:.0%} fulfilment: {res['price']:,.1f} ({up:+.0%})</span><br>
+            <span style="font-size:15px;color:#333;">Market discounts {imp_txt}</span></div>""", unsafe_allow_html=True)
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Price", f"{model.price:,.2f}")
+        m2.metric("Fair Value (today)", f"{res['price']:,.1f}", delta=f"{up:+.1%}")
+        m3.metric("Implied fulfilment", f"{impl:.0%}" if impl is not None else "n/a")
+        m4.metric("Implied P(Plan)", f"{p_plan:.0%}" if p_plan == p_plan else "n/a",
+                  delta=f"vs '{scen.index[1]}'", delta_color="off",
+                  help="p such that p × Plan + (1−p) × downside = price. Negative: price is below the downside case → WACC too low or market disbelieves it.")
+        m5.metric("TV %", f"{res['tv_pct']:.0%}")
+
+        st.markdown("---")
+        ch1, ch2 = st.columns(2)
+        with ch1:
+            st.subheader("Revenue by segment (plan)")
+            seg_cols = [s.name for s in segs]
+            years_x = [str(base_year)] + [str(y) for y in path.index[:n]]
+            figs = go.Figure()
+            palette = [C_TEAL, C_CORAL, C_AMBER, C_GREEN, "#8E44AD", "#7F8C8D"]
+            for i, sname in enumerate(seg_cols):
+                s_base = next(s.base for s in segs if s.name == sname)
+                figs.add_trace(go.Bar(name=sname, x=years_x, y=[s_base] + list(path[sname].iloc[:n]), marker_color=palette[i % len(palette)]))
+            figs.add_trace(go.Scatter(name="EBITDA", x=years_x, y=[ebitda_base] + list(path["EBITDA"].iloc[:n]), mode="lines+markers+text",
+                text=[f"{v:,.0f}" for v in [ebitda_base] + list(path["EBITDA"].iloc[:n])], textposition="top center", line=dict(color="#000", width=2)))
+            figs.update_layout(barmode="stack", height=400, plot_bgcolor="white", font=dict(family="Arial"), legend=dict(orientation="h", y=-0.15))
+            st.plotly_chart(figs, use_container_width=True)
+        with ch2:
+            st.subheader("Fair value roll-forward vs price")
+            rf_years = list(range(int(base_year), int(target_year)+1))
+            rf_vals = [gd.value(ginp, fulfil, t0=t)["price"] for t in range(n+1)]
+            ex10 = [None] + [(10*path["EBITDA"].iloc[t-1] + gd.value(ginp, fulfil, t0=t)["cash"])/model.shares*fx for t in range(1, n+1)]
+            ex15 = [None] + [(15*path["EBITDA"].iloc[t-1] + gd.value(ginp, fulfil, t0=t)["cash"])/model.shares*fx for t in range(1, n+1)]
+            figr = go.Figure()
+            figr.add_trace(go.Scatter(x=rf_years, y=rf_vals, mode="lines+markers+text", name="DCF fair value",
+                text=[f"{v:,.0f}" for v in rf_vals], textposition="top center", line=dict(color=C_TEAL, width=3)))
+            figr.add_trace(go.Scatter(x=rf_years, y=ex10, mode="lines", name="10x EBITDA exit", line=dict(color=C_AMBER, dash="dot")))
+            figr.add_trace(go.Scatter(x=rf_years, y=ex15, mode="lines", name="15x EBITDA exit", line=dict(color=C_GREEN, dash="dot")))
+            figr.add_hline(y=model.price, line_dash="dash", line_color=C_CORAL, annotation_text=f"Price {model.price:,.2f}")
+            figr.update_layout(height=400, plot_bgcolor="white", font=dict(family="Arial"), legend=dict(orientation="h", y=-0.15), yaxis_title="Price ccy")
+            st.plotly_chart(figr, use_container_width=True)
+            irr = (rf_vals[-1]/model.price)**(1/n)-1 if model.price and rf_vals[-1] > 0 else float("nan")
+            st.caption(f"If the {fulfil:.0%} case plays out: {rf_vals[-1]:,.0f} at end {target_year} → IRR from today {irr:.1%} p.a. (cash accumulates, no dividends).")
+
+        st.markdown("---")
+        s1, s2 = st.columns([2, 3])
+        with s1:
+            st.subheader("Scenarios")
+            figsc = go.Figure(go.Bar(x=list(scen.index), y=scen["Fair Value"], marker_color=[C_GREEN, C_AMBER, C_RED],
+                text=[f"{v:,.0f}<br>({u:+.0%})" for v, u in zip(scen["Fair Value"], scen["Upside"])], textposition="outside"))
+            figsc.add_hline(y=model.price, line_dash="dash", line_color=C_TEAL, annotation_text=f"Price {model.price:,.2f}")
+            figsc.update_layout(height=380, plot_bgcolor="white", font=dict(family="Arial"), showlegend=False)
+            st.plotly_chart(figsc, use_container_width=True)
+            st.caption("Downside = most speculative scalable segment at zero; Stall = downside + other scalable segments at 50%.")
+        with s2:
+            st.subheader("Sensitivity: fair value (WACC × plan fulfilment)")
+            w_rng = np.round(np.arange(max(0.04, wacc-0.02), wacc+0.031, 0.01), 3)
+            f_rng = [0.2, 0.4, 0.6, 0.8, 1.0, 1.2]
+            sdf = gd.sensitivity(ginp, w_rng, f_rng)
+            try:
+                st.dataframe(sdf.style.format("{:,.0f}").background_gradient(cmap="RdYlGn", axis=None), use_container_width=True)
+            except ImportError:
+                st.dataframe(sdf.style.format("{:,.0f}"), use_container_width=True)
+            st.caption(f"Rows: WACC · Columns: fulfilment of scalable segments · Price {model.price:,.2f}")
+
+        st.markdown("---")
+        st.subheader("Cash-flow path")
+        show = path[["Phase", "Revenue", "Growth", "EBITDA", "EBITDA Margin", "D&A", "EBIT", "FCFF"]].copy()
+        st.dataframe(show.style.format({"Revenue": "{:,.0f}", "Growth": "{:.1%}", "EBITDA": "{:,.0f}", "EBITDA Margin": "{:.1%}",
+                                        "D&A": "{:,.0f}", "EBIT": "{:,.0f}", "FCFF": "{:,.0f}"}), use_container_width=True, height=380)
+        st.session_state["guidance_result"] = {"fair_value": res["price"], "implied_fulfilment": impl, "p_plan": p_plan,
+                                               "scenarios": scen, "fulfilment": fulfil}
+    except Exception as e:
+        st.error(f"Guidance DCF error: {e}")
+        import traceback
+        with st.expander("Traceback"): st.code(traceback.format_exc())
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PDF EXPORT
 # ══════════════════════════════════════════════════════════════════════════════
+def _placeholder_png(w=900, h=420, text="Chart unavailable (kaleido/Chrome missing)"):
+    """Minimal PNG so the PDF still builds when static image export is not available."""
+    try:
+        from PIL import Image, ImageDraw
+        from io import BytesIO
+        im = Image.new("RGB", (w, h), "#F5F5F5"); d = ImageDraw.Draw(im); d.text((20, h//2), text, fill="#888888")
+        buf = BytesIO(); im.save(buf, format="PNG"); return buf.getvalue()
+    except Exception:
+        import zlib, struct
+        raw = b"".join(b"\x00" + b"\xf5\xf5\xf5" * w for _ in range(h))
+        def chunk(t, d): return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
 def _fig_to_png(fig, w=900, h=420, scale=2):
-    """Plotly figure → PNG bytes via Kaleido."""
-    return fig.to_image(format="png", width=w, height=h, scale=scale, engine="kaleido")
+    """Plotly figure → PNG bytes. Plotly 6 removed the `engine` kwarg (kaleido v1);
+    without it the call works on plotly 5 + kaleido 0.2.1 AND plotly 6 + kaleido >= 1.0."""
+    try:
+        return fig.to_image(format="png", width=w, height=h, scale=scale)
+    except Exception as e:
+        if "_png_warned" not in st.session_state:
+            st.sidebar.warning(f"PDF charts unavailable ({type(e).__name__}). "
+                               f"Pin plotly<6 + kaleido==0.2.1, or plotly>=6 + kaleido>=1.0 with chromium in packages.txt.")
+            st.session_state["_png_warned"] = True
+        return _placeholder_png(w, h)
 
 
 def _build_scenario_fan(r, model, C_TEAL, C_CORAL, C_AMBER, C_GREEN, C_RED):
@@ -1566,7 +1796,7 @@ def build_pdf(model, r, wacc, tg, proj_years, edited_df, n_fwd, ai_summary=None)
         else:
             tv_v = t_fcff / (wacc - tg_f); pv_tv = tv_v / (1 + wacc)**n_fwd
             tot_ev = pv_e + pv_tv
-            fair_eq = tot_ev - model.net_debt - model.minority
+            fair_eq = model.ev_to_equity(tot_ev)
             fp = fair_eq / model.shares if model.shares else 0
             up = fp / model.price - 1 if model.price else 0
 
@@ -1760,7 +1990,7 @@ if st.sidebar.button("Generate PDF", use_container_width=True):
                         if wacc > tg_f_:
                             tv_v_=t_fcff_/(wacc-tg_f_); pv_tv_=tv_v_/(1+wacc)**n_fwd
                             tot_ev_=pv_e_tmp+pv_tv_
-                            fair_eq_=tot_ev_-model.net_debt-model.minority
+                            fair_eq_=model.ev_to_equity(tot_ev_)
                             fp_=fair_eq_/model.shares if model.shares else 0
                             up_=fp_/model.price-1 if model.price else 0
                             fwd_result = {"fair_price": fp_, "upside": up_,
