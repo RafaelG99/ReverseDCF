@@ -22,6 +22,7 @@ class DCFConfig:
     implied_years: int = 8
     fade_years: int = 10
     use_midcycle_margin: bool = True  # If True, base FCFF uses mid-cycle margin instead of current
+    use_bbg_ev: bool = True           # If True, solver targets BBG EV (incl. pension/other adj.); else MCap + Net Debt + MI
 
 @dataclass
 class CScore:
@@ -346,7 +347,7 @@ class CoreDCF:
             bbg_ev = bbg_ev * self._fx_applied
         # Sanity: BBG-EV should be at least as big as MCap and within 30% of computed
         computed_ev = mcap + self.net_debt + mi
-        if bbg_ev and bbg_ev > mcap * 0.9 and abs(bbg_ev/computed_ev - 1) < 0.30:
+        if bbg_ev and self.config.use_bbg_ev and bbg_ev > mcap * 0.9 and abs(bbg_ev/computed_ev - 1) < 0.30:
             self.market_ev = bbg_ev
             self._ev_source = "BBG"
             self._ev_adjustment = bbg_ev - computed_ev
@@ -368,6 +369,16 @@ class CoreDCF:
             cons_fy1 = None
         self.consensus_growth_fy1 = cons_fy1/self.base_revenue-1 if cons_fy1 and self.base_revenue>0 else 0.0
         self.consensus_growth_fy2 = cons_fy2/cons_fy1-1 if cons_fy2 and cons_fy1 and cons_fy1>0 else self.consensus_growth_fy1
+        cons_fy3 = self._safe_num(self.current.get("Cons Rev FY3"))
+        self.consensus_growth_fy3 = cons_fy3/cons_fy2-1 if cons_fy3 and cons_fy2 and cons_fy2>0 else None
+        self.has_consensus_fy3 = self.consensus_growth_fy3 is not None
+        # Stage-1 growth list; FY3 only used if config.consensus_years == 3
+        self.consensus_growth_list = [self.consensus_growth_fy1, self.consensus_growth_fy2]
+        if self.config.consensus_years >= 3 and self.has_consensus_fy3:
+            self.consensus_growth_list.append(self.consensus_growth_fy3)
+        if self.has_consensus_fy3 and self.config.consensus_years < 3 and abs(self.consensus_growth_fy3) > 0.15:
+            self._warnings.append(f"INFO: Consensus FY3 ({self.consensus_growth_fy3:+.1%}) available but not used "
+                                  f"(Stage 1 = 2Y). Set 'Consensus Years' = 3 in the sidebar to include it.")
 
         bbg_w = self._safe_num(self.current.get("BBG WACC"))
         if bbg_w and bbg_w>1: bbg_w /= 100
@@ -382,6 +393,11 @@ class CoreDCF:
         nopat = revenue * m * (1 - self.tax_rate)
         return nopat + revenue*self.da_pct - revenue*self.capex_pct - revenue*abs(self.nwc_change_pct) - revenue*self.sbc_pct
 
+    # ══ EV → EQUITY (single source of truth) ══════════════════════════════════
+    def ev_to_equity(self, ev):
+        """EV → Equity, consistent with the solver target (market_ev)."""
+        return ev - self.net_debt - self.minority - getattr(self, "_ev_adjustment", 0.0)
+
     # ══ 4-STAGE DCF ══════════════════════════════════════════════════════════
     def _ev_from_fcf_growth(self, ig):
         w=self.config.wacc; tg=self.config.terminal_growth
@@ -389,7 +405,7 @@ class CoreDCF:
         if w<=tg: return np.inf
         fcff=self.base_fcff; pv=0.0; yr=0
         for i in range(n1):
-            yr+=1; g=[self.consensus_growth_fy1,self.consensus_growth_fy2][min(i,1)]
+            yr+=1; g=self.consensus_growth_list[min(i,len(self.consensus_growth_list)-1)]
             fcff*=(1+g); pv+=fcff/(1+w)**yr
         for i in range(n2):
             yr+=1; fcff*=(1+ig); pv+=fcff/(1+w)**yr
@@ -454,7 +470,10 @@ class CoreDCF:
         r={}; exp_price = 0.0
         for lbl,off,prob in zip(["Bear","Base","Bull"],offsets,probs):
             g=base_g+off; ev=self._ev_from_fcf_growth(g)
-            eq=ev-self.net_debt-self.minority; fp=eq/self.shares if self.shares else 0
+            # Subtract the same claims the solver target (market_ev) contains:
+            # net debt, minorities AND the BBG-EV adjustment (pension/other). Otherwise
+            # Base != Price by construction and the verdict contradicts the fan.
+            eq=self.ev_to_equity(ev); fp=eq/self.shares if self.shares else 0
             up=fp/self.price-1 if self.price else 0
             r[lbl]={"growth_rate":g,"ev":ev,"fair_price":fp,"upside":up,"probability":prob}
             exp_price += fp * prob
@@ -470,7 +489,7 @@ class CoreDCF:
         w=self.config.wacc; tg=self.config.terminal_growth
         fcff=self.base_fcff; pv_e=0.0; yr=0
         for i in range(self.config.consensus_years):
-            yr+=1; g=[self.consensus_growth_fy1,self.consensus_growth_fy2][min(i,1)]
+            yr+=1; g=self.consensus_growth_list[min(i,len(self.consensus_growth_list)-1)]
             fcff*=(1+g); pv_e+=fcff/(1+w)**yr
         for i in range(self.config.implied_years):
             yr+=1; fcff*=(1+ig); pv_e+=fcff/(1+w)**yr
@@ -569,7 +588,8 @@ class CoreDCF:
             roic=(nopat/ic).replace([np.inf,-np.inf],np.nan).dropna()
             if len(roic)>0: qp.roic_median=float(roic.median())
             if len(roic)>=3:
-                if roic.iloc[-1]>roic.iloc[-3]+0.02: qp.roic_trend="improving"
+                if float(roic.std())>0.10: qp.roic_trend="volatile"
+                elif roic.iloc[-1]>roic.iloc[-3]+0.02: qp.roic_trend="improving"
                 elif roic.iloc[-1]<roic.iloc[-3]-0.02: qp.roic_trend="declining"
                 else: qp.roic_trend="stable"
         if "EBIT" in h and "Revenue" in h:
@@ -657,7 +677,11 @@ class CoreDCF:
         rg=(rv.iloc[-1]/rv.iloc[0])**(1/n)-1 if rv.iloc[0]>0 else 0
         m0=ebit.iloc[0]/rv.iloc[0] if len(ebit)>0 and rv.iloc[0]>0 else 0
         m1=ebit.iloc[-1]/rv.iloc[-1] if len(ebit)>0 and rv.iloc[-1]>0 else 0
-        me=(m1/m0)**(1/n)-1 if m0>0 else 0
+        margin_nm = not (m0 > 0 and m1 > 0)   # log-decomposition undefined if a margin is <= 0
+        me=(m1/m0)**(1/n)-1 if not margin_nm else 0.0
+        if margin_nm:
+            self._warnings.append(f"INFO: Return decomposition — margin effect not meaningful "
+                                  f"(EBIT margin {m0:.1%} → {m1:.1%} crosses zero); folded into 'Multiple & Other'.")
         # Shares: detect dilution vs buyback
         if len(sh)>=2 and sh.iloc[0]>0:
             share_change = (sh.iloc[-1]/sh.iloc[0])**(1/n)-1
@@ -676,7 +700,7 @@ class CoreDCF:
         mexp=tr-rg-me-bb-dy
         return {"available":True,"start_year":str(pr.index[0].year),"end_year":str(pr.index[-1].year),
             "years":n,"total_return_ann":tr,"revenue_growth_ann":rg,"margin_effect_ann":me,
-            "buyback_ann":bb,"dividend_yield":dy,"multiple_expansion_ann":mexp,
+            "buyback_ann":bb,"dividend_yield":dy,"multiple_expansion_ann":mexp,"margin_nm":margin_nm,
             "margin_first":m0,"margin_last":m1,"price_first":float(p0),"price_last":float(p1),
             "shares_first":float(sh.iloc[0]) if len(sh)>0 else 0,"shares_last":float(sh.iloc[-1]) if len(sh)>0 else 0}
 
@@ -684,7 +708,7 @@ class CoreDCF:
     def implied_multiples(self, fair_ev, projected_revenue=None, projected_ebit=None, projected_ebitda=None, projected_ni=None):
         """What multiples does your fair value imply?"""
         result = {}
-        fair_eq = fair_ev - self.net_debt - self.minority
+        fair_eq = self.ev_to_equity(fair_ev)
         fair_price = fair_eq / self.shares if self.shares else 0
         if projected_ebit and projected_ebit > 0:
             result["implied_EV/EBIT"] = fair_ev / projected_ebit
@@ -727,7 +751,7 @@ class CoreDCF:
             "terminal_growth":self.config.terminal_growth,"base_fcff":self.base_fcff,
             "base_fcff_per_share":self.base_fcff_per_share,"ebit_margin":self.ebit_margin,
             "mid_cycle_margin":self.mid_cycle_margin,"margin_range":(self.margin_min,self.margin_max),
-            "consensus_fy1":self.consensus_growth_fy1,"consensus_fy2":self.consensus_growth_fy2,
+            "consensus_fy1":self.consensus_growth_fy1,"consensus_fy2":self.consensus_growth_fy2,"consensus_fy3":self.consensus_growth_fy3,
             "dso":self.dso,"dpi":self.dpi,
             "scenarios":sc,"tv_decomposition":tv,"quality":q,"historical_multiples":hm,
             "return_decomposition":rd,"plausibility":pl,"cagr_5y":c5,"cagr_3y":c3,
