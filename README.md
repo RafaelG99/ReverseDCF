@@ -1,88 +1,29 @@
-# Reverse DCF
+# CORE DCF v4
 
-Implied growth extraction + scenario analysis for equity screening.
+Ein FCFF-Rechner, zwei Fragen, drei Tabs. Input bleibt `core_dcf_template.xlsx` (Fundamentals HC, Current, WACC, optional Peers, optional Guidance).
 
-## Setup
+## Idee
+1. **Basis (normalisiert)** ist ein expliziter Input in der Sidebar. Das Tool schlägt Revenue, EBIT-Marge, D&A, CapEx, SBC, NWC und Steuersatz aus der Historie vor und zeigt eine Ampel: 🟢 Marge stabil, 🟡 zyklisch (Trimmed Mean), 🔴 Marge kreuzt null (du musst sie selbst setzen). Ohne belastbare Basis gibt es keine belastbare Reverse DCF, egal wie viele Tabs.
+2. **Reverse DCF**: welches FCF-Wachstum (Stage 2, n Jahre nach 1-3 Konsensjahren, danach 10 Jahre Fade auf Tg) rechtfertigt den Kurs auf dieser Basis? Plausibilität gegen 5Y/3Y-CAGR und Konsens, Sensitivität WACC × Tg.
+3. **Mein Pfad**: Wachstum, Marge, CapEx, D&A, SBC, Tax pro Jahr editierbar. Default = marktimplizierter Pfad, d.h. Fair Value = Kurs, bis du etwas änderst. Optional Segmente (Guidance-Sheet oder manuell) mit Planerfüllungs-Hebel, die die Wachstumszeile vorbefüllen. Output: Fair Value, Bear/Bull (Wachstum über Tg ×0.5/×1.5, Marge ∓2pp), Roll-Forward mit IRR, Sensitivität WACC × Wachstumsskala.
+4. **Kontext**: Quality-Kennzahlen, historische Multiples, Peers. Tabellen, keine Charts.
 
-```bash
-pip install -r requirements.txt
+## Konventionen
+- EV → Equity läuft durch genau eine Funktion (`ev_to_equity`): Net Debt, Minorities und die BBG-EV-Adjustierung (falls "Use BBG EV" an). Dadurch ist der Basis-Pfad per Konstruktion = Kurs.
+- Fundamentals-Währung ≠ Kurswährung (z.B. Cosmo EUR/CHF): Feld **FX Rate** im Current-Sheet = Kurswährung → Fundamentals-Währung (CHF→EUR = 1/0.94 = 1.064). Alle Fair Values werden in Kurswährung angezeigt.
+- Keine Steuergutschrift auf negative EBITs. NWC = % des Umsatz-Zuwachses (aus DSO + DSI).
+- Konsens FY3 (BEST_SALES_3BF) optional als drittes Stage-1-Jahr.
+
+## Guidance-Sheet (optional)
 ```
-
-## Workflow
-
+Base Year   | 2025
+Target Year | 2030
+Segment | Base | Target | Scalable | Ramp
+Gastro  | 54.3 | 57.6   | 0        |
+GI Genius | 16.6 | 168  | 1        |
+New Products | 0 | 216  | 1        | 0,5,21,53,100
 ```
-Bloomberg Terminal                    Streamlit App
-┌──────────────────────┐             ┌────────────────────┐
-│  templates/           │   upload    │  app.py            │
-│  reverse_dcf.xlsx    │  ────────►  │                    │
-│                      │             │  Scenario fan       │
-│  1. Change ticker    │             │  ROIC gate          │
-│  2. BDH loads        │             │  TV decomposition   │
-│  3. Copy → HC block  │             │  Sensitivity        │
-│  4. Save             │             │  All adjustable     │
-└──────────────────────┘             └────────────────────┘
-```
+Ramp = % des Ziels je Planjahr (leer = geometrisch). Scalable = Planerfüllungs-Hebel wirkt.
 
-### Bloomberg
-
-1. Open `templates/reverse_dcf.xlsx` on Bloomberg Terminal
-2. Change ticker in `Fundamentals!B2`
-3. Set start/end year in `T1`/`T2` (default 2019-2024)
-4. Each BDH cell loads one value (no spill)
-5. Copy BBG block → Paste Values into HC block
-6. Same for Current (col B → col C) and Macro (col C → col D)
-7. Save to `data/` folder
-
-### Analysis
-
-```bash
-# Interactive dashboard
-streamlit run app.py
-
-# CLI
-python reverse_dcf_engine.py data/reverse_dcf.xlsx
-
-# Batch screening
-python screener.py data/ --sort Base_Upside --export results.xlsx
-```
-
-## Excel Structure
-
-**Fundamentals** (transposed: fields as columns, years as rows)
-- Row 1: Field headers | Row 2: Ticker | Row 3: BBG fields
-- Rows 6-11: BBG BDH (each cell = own formula, dynamic year from col A)
-- Row 12: LTM (BDP) | Row 13: FY1 Estimates (BDP BEST_*)
-- Rows 17-22: Hard Copy (paste values) | Row 23: HC LTM | Row 24: HC FY1
-- Rows 28-33: Derived metrics (margins, ROIC, FCFF)
-- Row 36+: Summary stats (CAGRs, medians)
-
-**Current**: BDP live (col B) | Hard Copy (col C)
-
-**Macro**: Risk-free rates (BDP + HC), GDP growth, ERP
-
-**WACC**: Linked to HC sheets | Manual override | Active switch
-
-## Engine
-
-Given a stock price, solves for implied revenue growth (FCFF-based, 2-stage DCF), then:
-- Scenario Fan (Bull/Base/Bear)
-- ROIC Gate (value creation check)
-- TV Decomposition (explicit vs terminal %)
-- Plausibility Checks (implied vs historical)
-- Sensitivity Table (WACC × Terminal Growth)
-
-## Files
-
-```
-reverse-dcf/
-├── reverse_dcf_engine.py   # Core DCF engine
-├── app.py                  # Streamlit dashboard
-├── screener.py             # Batch screening
-├── requirements.txt
-├── .gitignore
-├── README.md
-├── templates/
-│   └── reverse_dcf.xlsx    # Bloomberg template (no data)
-└── data/                   # .gitignored
-    └── .gitkeep
-```
+## Dateien
+`app.py` · `reverse_dcf_engine.py` · `guidance_dcf.py` · `requirements.txt` · `templates/core_dcf_template.xlsx`
