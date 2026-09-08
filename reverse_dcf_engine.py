@@ -297,9 +297,11 @@ class CoreDCF:
                              "D&A/Rev": [b.da_pct] * n, "SBC/Rev": [b.sbc_pct] * n, "Tax": [b.tax_rate] * n},
                             index=[f"Y{i}" for i in range(1, n + 1)])
 
-    def value_path(self, path: pd.DataFrame, growth_scale: float = 1.0, margin_shift: float = 0.0) -> Dict[str, object]:
+    def value_path(self, path: pd.DataFrame, growth_scale: float = 1.0, margin_shift: float = 0.0,
+                   g_fade_start: Optional[float] = None, margin_fade_to: Optional[float] = None) -> Dict[str, object]:
         """path: rows Y1..Yn with Growth, EBIT Margin, CapEx/Rev, D&A/Rev, SBC/Rev, Tax (fractions).
-        After Yn: growth fades linearly to Tg over fade_years, ratios held. Returns EV, fair price (quote ccy), table."""
+        After Yn: growth fades linearly from g_fade_start (default: last path growth, capped at 10%) to Tg over
+        fade_years; EBIT margin fades linearly to margin_fade_to (default: last path margin). Ratios held."""
         w, tg, nf = self.config.wacc, self.config.terminal_growth, self.config.fade_years
         if w <= tg: raise ValueError("WACC must exceed terminal growth")
         rows = []; rev = self.base.revenue; pv = 0.0; t = 0
@@ -314,10 +316,15 @@ class CoreDCF:
         for _, r in path.iterrows():
             g = tg + (float(r["Growth"]) - tg) * growth_scale
             step(g, float(r["EBIT Margin"]) + margin_shift, float(r["CapEx/Rev"]), float(r["D&A/Rev"]), float(r["SBC/Rev"]), float(r["Tax"]), "Path")
-        last = path.iloc[-1]; g_last = tg + (float(last["Growth"]) - tg) * growth_scale; m_last = float(last["EBIT Margin"]) + margin_shift
+        last = path.iloc[-1]
+        g0 = min(float(last["Growth"]), 0.10) if g_fade_start is None else g_fade_start
+        g_last = tg + (g0 - tg) * growth_scale
+        m_last = float(last["EBIT Margin"]) + margin_shift
+        m_end = m_last if margin_fade_to is None else margin_fade_to + margin_shift
         for i in range(nf):
-            g = g_last + (tg - g_last) * (i + 1) / nf
-            step(g, m_last, float(last["CapEx/Rev"]), float(last["D&A/Rev"]), float(last["SBC/Rev"]), float(last["Tax"]), "Fade")
+            fp = (i + 1) / nf; fg = i / max(nf - 1, 1)          # growth: starts AT g_fade_start, reaches Tg in last fade year
+            step(g_last + (tg - g_last) * fg, m_last + (m_end - m_last) * fp,
+                 float(last["CapEx/Rev"]), float(last["D&A/Rev"]), float(last["SBC/Rev"]), float(last["Tax"]), "Fade")
         f_tv = rows[-1]["FCFF"] * (1 + tg); pv_tv = f_tv / (w - tg) / (1 + w) ** t
         ev = pv + pv_tv; tbl = pd.DataFrame(rows).set_index("Year")
         return {"ev": ev, "pv_explicit": pv, "pv_tv": pv_tv, "tv_pct": pv_tv / ev if ev else np.nan,
