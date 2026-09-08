@@ -49,6 +49,9 @@ key = f"base_{model.ticker}"
 if key not in st.session_state:
     st.session_state[key] = {"margin": bp.ebit_margin, "capex": bp.capex_pct, "da": bp.da_pct, "sbc": bp.sbc_pct, "nwc": bp.nwc_pct, "tax": bp.tax_rate}
 sb = st.session_state[key]
+if "revenue" not in sb: sb["revenue"] = model.base_revenue
+sb["revenue"] = st.sidebar.number_input("Base revenue", value=float(sb["revenue"]), step=1.0, format="%.1f",
+                                        help=f"Reported {model.base_revenue:,.1f}. Override e.g. for recurring-only guidance bases.")
 c1, c2 = st.sidebar.columns(2)
 sb["margin"] = c1.number_input("EBIT margin (%)", value=round(sb["margin"] * 100, 1), step=0.5, format="%.1f",
                                help=f"Current {model.current_margin:.1%} · proposal {bp.ebit_margin:.1%}") / 100
@@ -62,10 +65,10 @@ sb["nwc"] = c6.number_input("NWC/ΔRev (%)", value=round(sb["nwc"] * 100, 1), st
                             help=f"From DSO {model.dso:.0f}d + DSI {model.dpi:.0f}d") / 100
 if st.sidebar.button("Reset to proposal"):
     del st.session_state[key]; st.rerun()
-base = Base(model.base_revenue, sb["margin"], sb["da"], sb["capex"], sb["sbc"], sb["nwc"], sb["tax"])
+base = Base(sb["revenue"], sb["margin"], sb["da"], sb["capex"], sb["sbc"], sb["nwc"], sb["tax"])
 model.set_base(base)
 base_fcff = base.fcff()
-st.sidebar.caption(f"Revenue {model.base_revenue:,.0f} · Base FCFF **{base_fcff:,.0f}** ({base_fcff/model.base_revenue:.1%}) · "
+st.sidebar.caption(f"Revenue {base.revenue:,.0f} · Base FCFF **{base_fcff:,.0f}** ({base_fcff/model.base_revenue:.1%}) · "
                    f"FCF yield on EV **{base_fcff/model.market_ev:.1%}**" if model.market_ev else "")
 
 sol = model.solve_implied_growth(); ig = sol["growth"]
@@ -164,11 +167,17 @@ with tab2:
     disp.columns = ["Growth %", "EBIT margin %", "CapEx/Rev %", "D&A/Rev %", "SBC/Rev %", "Tax %"]
     edited = st.data_editor(disp.T, use_container_width=True, key=pkey)   # metrics as rows, years as columns
     path = (edited.T / 100.0); path.columns = defaults.columns
+    f1, f2 = st.columns(2)
+    g_fade = f1.number_input("Growth in first fade year (%)", value=round(min(float(path['Growth'].iloc[-1]), 0.10) * 100, 1), step=0.5, format="%.1f",
+                             help="Fade starts here and goes linearly to Tg over 10 years. Default: last path growth, capped at 10%.") / 100
+    m_fade = f2.number_input("EBIT margin at end of fade (%)", value=round(float(path['EBIT Margin'].iloc[-1]) * 100, 1), step=0.5, format="%.1f",
+                             help="Terminal margin. Default: last path margin (no fade).") / 100
+    fade_kw = dict(g_fade_start=g_fade, margin_fade_to=m_fade)
 
     try:
-        res = model.value_path(path)
-        bear = model.value_path(path, growth_scale=0.5, margin_shift=-0.02)
-        bull = model.value_path(path, growth_scale=1.5, margin_shift=+0.02)
+        res = model.value_path(path, **fade_kw)
+        bear = model.value_path(path, growth_scale=0.5, margin_shift=-0.02, **fade_kw)
+        bull = model.value_path(path, growth_scale=1.5, margin_shift=+0.02, **fade_kw)
         up = res["upside"]; vc = GREEN if up > 0.2 else AMBER if up > -0.1 else RED
         st.markdown(f"""<div style="background:{vc}15;border-left:5px solid {vc};padding:16px 22px;border-radius:4px;margin:12px 0;">
             <span style="font-size:24px;font-weight:bold;color:{vc};">Fair value {res['price']:,.1f}  ({up:+.0%})</span>
@@ -184,9 +193,9 @@ with tab2:
         c1, c2 = st.columns(2)
         with c1:
             st.subheader("Fair value roll-forward")
-            yrs = min(n_path, 10); rf = model.roll_forward(path, yrs)
-            rf_bear = model.roll_forward(path, yrs, growth_scale=0.5, margin_shift=-0.02)
-            rf_bull = model.roll_forward(path, yrs, growth_scale=1.5, margin_shift=+0.02)
+            yrs = min(n_path, 10); rf = model.roll_forward(path, yrs, **fade_kw)
+            rf_bear = model.roll_forward(path, yrs, growth_scale=0.5, margin_shift=-0.02, **fade_kw)
+            rf_bull = model.roll_forward(path, yrs, growth_scale=1.5, margin_shift=+0.02, **fade_kw)
             x = list(range(yrs + 1)); fig = go.Figure()
             fig.add_trace(go.Scatter(x=x, y=rf_bull, mode="lines", name="Bull", line=dict(color=GREEN, dash="dot")))
             fig.add_trace(go.Scatter(x=x, y=rf, mode="lines+markers+text", name="Path", text=[f"{v:,.0f}" for v in rf], textposition="top center", line=dict(color=TEAL, width=3)))
@@ -202,7 +211,7 @@ with tab2:
             rows = {}
             for w in w_rng:
                 model.config.wacc = w
-                rows[f"{w:.1%}"] = [model.value_path(path, growth_scale=s)["price"] for s in s_rng]
+                rows[f"{w:.1%}"] = [model.value_path(path, growth_scale=s, **fade_kw)["price"] for s in s_rng]
             model.config.wacc = wacc
             sens = pd.DataFrame(rows, index=[f"{s:.0%} of growth" for s in s_rng]).T
             try: st.dataframe(sens.style.format("{:,.0f}").background_gradient(cmap="RdYlGn", axis=None), use_container_width=True)
